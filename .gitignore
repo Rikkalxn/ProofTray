@@ -1,0 +1,47 @@
+.gradle/
+.kotlin/
+.idea/
+**/.idea/
+**/build/
+cmake-build-*/
+.cxx/
+**/.cxx/
+CMakeUserPresets.json
+local.properties
+captures/
+private/
+dist/
+out/
+keystore.properties
+signing.properties
+*.iml
+*.jks
+*.keystore
+*.p12
+*.pfx
+hs_err_pid*.log
+replay_pid*.log
+
+# Local assistant instructions and workspace settings.
+AGENTS.md
+AGENT.md
+.agents/
+.codex/
+
+# Local setup helpers and historical handoff records (kept on disk).
+/tools/setup-android.ps1
+/tools/setup-jdk.ps1
+/tools/setup-native.ps1
+/tools/open-android-studio.ps1
+/tools/package-handoff.ps1
+/docs/HANDOFF.md
+/docs/verification-*.md
+
+# Release artifacts, local credentials and device captures.
+*.apk
+*.aab
+*.apks
+*.hprof
+.env
+.env.*
+!.env.example

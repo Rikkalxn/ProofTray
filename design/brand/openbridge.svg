@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 72 72">
+  <title>OpenBridge — open photo frame and bridge</title>
+  <rect width="72" height="72" rx="18" fill="#50379b"/>
+  <g transform="translate(-18 -18)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M64 30H41C34.925 30 30 34.925 30 41V67C30 73.075 34.925 78 41 78H67C73.075 78 78 73.075 78 67V55"
+      stroke="#fff" stroke-width="7"/>
+    <path d="M37 65C41 54 47 49 54 49C61 49 67 54 71 65" stroke="#beecdd" stroke-width="6"/>
+    <path d="M44 55V65M64 55V65" stroke="#beecdd" stroke-width="3.5"/>
+    <path d="M36 65H72" stroke="#fff" stroke-width="6"/>
+    <circle cx="73" cy="36" r="4.5" fill="#beecdd"/>
+  </g>
+</svg>

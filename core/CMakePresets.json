@@ -1,0 +1,19 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 22, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "core-debug",
+      "displayName": "OpenBridge C++ core",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/../out/build/clion-core-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "OPENBRIDGE_BUILD_TESTS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [{ "name": "core-debug", "configurePreset": "core-debug", "targets": ["openbridge_catalog_tests"] }],
+  "testPresets": [{ "name": "core-debug", "configurePreset": "core-debug", "output": { "outputOnFailure": true } }]
+}
