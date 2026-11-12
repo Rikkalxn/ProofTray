@@ -63,7 +63,7 @@ internal object RawPreviewExtractor {
             }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) {
-            Log.d("OpenBridgePreview", "embedded JPEG unavailable: ${error.javaClass.simpleName}")
+            Log.d("OpenBridgePreview", "embedded JPEG unavailable: ${error.javaClass.simpleName}: ${error.message}")
             null
         }
     }

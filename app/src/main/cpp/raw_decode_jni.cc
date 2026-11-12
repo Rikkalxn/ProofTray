@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "linear_raw.h"
+#include "raw_file_stream.h"
 #include "openbridge/log_encoding.h"
 #include "openbridge/raw_exposure.h"
 
@@ -51,8 +52,7 @@ namespace {
 using openbridge::Rgb;
 
 std::unique_ptr<openbridge::LinearRaster> ReadLinear(int fd, int edge, int64_t budget, openbridge::RawDecodeSize mode, Cancellation& cancel) {
-  if (fd < 0) throw std::invalid_argument("Invalid file descriptor");
-  return std::make_unique<openbridge::LinearRaster>("/proc/self/fd/" + std::to_string(fd), edge, budget, mode, Progress, &cancel);
+  return std::make_unique<openbridge::LinearRaster>(std::make_unique<openbridge::RawFileStream>(fd), edge, budget, mode, Progress, &cancel);
 }
 
 // Only called for a bitmap that has not been handed back to Java. Preserve the original JNI failure during cleanup.
@@ -182,11 +182,11 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_org_openbridge_app_data_RawPreviewE
   return static_cast<jbyteArray>(WithSignal(env, signal, [&](Cancellation& cancel) -> jobject {
     if (descriptor < 0 || !color_space || env->GetArrayLength(color_space) != 1) throw std::invalid_argument("Invalid RAW preview descriptor");
     constexpr unsigned kMaxBytes = 16 * 1024 * 1024;
+    openbridge::RawFileStream input(descriptor);
     auto raw = std::make_unique<LibRaw>();
     raw->set_progress_handler(Progress, &cancel);
     raw->imgdata.rawparams.max_raw_memory_mb = 64;
-    const std::string path = "/proc/self/fd/" + std::to_string(descriptor);
-    Check(raw->open_file(path.c_str()), "Open RAW preview");
+    Check(raw->open_datastream(&input), "Open RAW preview");
     const jint space = raw->imgdata.makernotes.common.ColorSpace;
     env->SetIntArrayRegion(color_space, 0, 1, &space);
     if (env->ExceptionCheck()) return nullptr;
