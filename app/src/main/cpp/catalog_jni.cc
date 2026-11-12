@@ -1,5 +1,7 @@
 #include <jni.h>
 
+#include "jni_support.h"
+
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -23,22 +25,13 @@ constexpr jsize kMaxAssets = 500000;
 constexpr jsize kMaxTags = 2000000;
 constexpr int64_t kMissingInteger = std::numeric_limits<int64_t>::min();
 
-void ThrowJava(JNIEnv* environment, const char* type, const char* message) {
-  if (environment->ExceptionCheck()) return;
-  jclass exception = environment->FindClass(type);
-  if (exception != nullptr) {
-    environment->ThrowNew(exception, message);
-    environment->DeleteLocalRef(exception);
-  }
-}
+using openbridge::jni::ThrowJava;
+using openbridge::jni::CheckJni;
 
 void Require(bool condition, const char* message) {
   if (!condition) throw std::invalid_argument(message);
 }
 
-void CheckJni(JNIEnv* environment) {
-  if (environment->ExceptionCheck()) throw std::runtime_error("JNI access failed");
-}
 
 void AppendUtf8(std::string& output, uint32_t code_point) {
   if (code_point < 0x80) {
@@ -122,7 +115,7 @@ std::optional<double> OptionalDecimal(jdouble value) {
 
 jintArray Query(JNIEnv* environment, jobjectArray text, jlongArray integers, jdoubleArray decimals, jobjectArray tags,
                 jobjectArray filter_text, jlongArray filter_integers, jdoubleArray filter_decimals, jobjectArray filter_tags,
-                jboolean collapse_bursts) {
+                jboolean collapse_stacks) {
   Require(text && integers && decimals && tags && filter_text && filter_integers && filter_decimals && filter_tags, "Null catalog arrays");
   const jsize text_count = environment->GetArrayLength(text);
   Require(text_count % kTextStride == 0, "Invalid catalog text stride");
@@ -157,7 +150,7 @@ jintArray Query(JNIEnv* environment, jobjectArray text, jlongArray integers, jdo
     asset.lens = ReadString(environment, text, index * kTextStride + 3);
     asset.source_id = ReadString(environment, text, index * kTextStride + 4);
     asset.folder = ReadString(environment, text, index * kTextStride + 5);
-    asset.burst_id = ReadString(environment, text, index * kTextStride + 6);
+    asset.stack_id = ReadString(environment, text, index * kTextStride + 6);
     asset.format = static_cast<openbridge::MediaFormat>(number[0]);
     asset.size_bytes = OptionalInteger(number[1]);
     asset.captured_at_ms = OptionalInteger(number[2]);
@@ -203,7 +196,7 @@ jintArray Query(JNIEnv* environment, jobjectArray text, jlongArray integers, jdo
     filter.required_tags.push_back(ReadString(environment, filter_tags, index));
   }
 
-  const auto result = openbridge::QueryCatalog(assets, filter, collapse_bursts == JNI_TRUE);
+  const auto result = openbridge::QueryCatalog(assets, filter, collapse_stacks == JNI_TRUE);
   std::vector<jint> encoded{1, static_cast<jint>(result.matched_count), static_cast<jint>(result.pending_metadata_count),
                             static_cast<jint>(result.groups.size())};
   encoded.reserve(4 + result.groups.size() * 3 + assets.size());
@@ -223,9 +216,9 @@ jintArray Query(JNIEnv* environment, jobjectArray text, jlongArray integers, jdo
 
 extern "C" JNIEXPORT jintArray JNICALL Java_org_openbridge_app_domain_CatalogEngine_queryNative(
     JNIEnv* environment, jobject, jobjectArray text, jlongArray integers, jdoubleArray decimals, jobjectArray tags,
-    jobjectArray filter_text, jlongArray filter_integers, jdoubleArray filter_decimals, jobjectArray filter_tags, jboolean collapse_bursts) {
+    jobjectArray filter_text, jlongArray filter_integers, jdoubleArray filter_decimals, jobjectArray filter_tags, jboolean collapse_stacks) {
   try {
-    return Query(environment, text, integers, decimals, tags, filter_text, filter_integers, filter_decimals, filter_tags, collapse_bursts);
+    return Query(environment, text, integers, decimals, tags, filter_text, filter_integers, filter_decimals, filter_tags, collapse_stacks);
   } catch (const std::bad_alloc&) {
     ThrowJava(environment, "java/lang/OutOfMemoryError", "Not enough memory for the catalog query");
   } catch (const std::invalid_argument& error) {

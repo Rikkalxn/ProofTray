@@ -4,6 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.openbridge.app.domain.DownloadState
 import org.openbridge.app.domain.ExportFormat
+import org.openbridge.app.domain.ExportDestination
 import org.openbridge.app.domain.ExportOptions
 import org.openbridge.app.domain.ExportStatus
 import org.openbridge.app.domain.ExportTask
@@ -27,6 +28,7 @@ internal object RecordCodec {
         putNullable("capturedAtMillis", asset.capturedAtMillis)
         putNullable("width", asset.width)
         putNullable("height", asset.height)
+        putNullable("sourceOrientation", asset.sourceOrientation)
         put("camera", asset.camera)
         put("lens", asset.lens)
         putNullable("iso", asset.iso)
@@ -40,6 +42,7 @@ internal object RecordCodec {
         put("sourceId", asset.sourceId)
         put("folder", asset.folder)
         putNullable("burstId", asset.burstId)
+        putNullable("stackId", asset.stackId)
         put("metadataComplete", asset.metadataComplete)
         putNullable("cameraFileKey", asset.cameraFileKey)
         put("inImportList", asset.inImportList)
@@ -56,13 +59,14 @@ internal object RecordCodec {
         id = json.getString("id"), uri = json.getString("uri"), name = json.getString("name"),
         format = MediaFormat.valueOf(json.getString("format")), sizeBytes = json.optLong("sizeBytes", 0),
         capturedAtMillis = json.longOrNull("capturedAtMillis"), width = json.intOrNull("width"), height = json.intOrNull("height"),
+        sourceOrientation = json.intOrNull("sourceOrientation")?.takeIf { it in 1..8 },
         camera = json.optString("camera", ""), lens = json.optString("lens", ""), iso = json.intOrNull("iso"),
         aperture = json.doubleOrNull("aperture"), exposureSeconds = json.doubleOrNull("exposureSeconds"),
         focalLengthMm = json.doubleOrNull("focalLengthMm"), rating = json.optInt("rating", 0),
         pickState = PickState.valueOf(json.optString("pickState", PickState.UNMARKED.name)),
         downloadState = DownloadState.valueOf(json.optString("downloadState", DownloadState.DOWNLOADED.name)),
         tags = json.stringSet("tags"), sourceId = json.optString("sourceId", "local"), folder = json.optString("folder", ""),
-        burstId = json.stringOrNull("burstId"), metadataComplete = json.optBoolean("metadataComplete", false),
+        burstId = json.stringOrNull("burstId"), stackId = json.stringOrNull("stackId"), metadataComplete = json.optBoolean("metadataComplete", false),
         cameraFileKey = cameraKey(json), inImportList = json.optBoolean("inImportList", isCameraSource(json.optString("sourceId", "local"))),
         hiddenFromLibrary = json.optBoolean("hiddenFromLibrary", false), importedAtMillis = json.longOrNull("importedAtMillis"),
         previewUri = json.stringOrNull("previewUri"), previewRevision = json.stringOrNull("previewRevision"),
@@ -132,7 +136,9 @@ internal object RecordCodec {
             put("format", task.options.format.name)
             put("jpegQuality", task.options.jpegQuality)
             put("maxEdge", task.options.maxEdge)
+            put("destination", task.options.destination.name)
             put("look", task.options.look?.let(LookCodec::encode) ?: JSONObject.NULL)
+            put("frame", task.options.frame?.let(org.openbridge.app.frame.FrameCodec::encodeSnapshot) ?: JSONObject.NULL)
         })
         put("destinationUri", task.destinationUri)
         put("status", task.status.name)
@@ -147,7 +153,9 @@ internal object RecordCodec {
             id = json.getString("id"), asset = decodeAsset(json.getJSONObject("asset")),
             options = ExportOptions(
                 ExportFormat.valueOf(options.getString("format")), options.optInt("jpegQuality", 95), options.optInt("maxEdge", 0),
-                options.optJSONObject("look")?.let(LookCodec::decode)
+                options.optJSONObject("look")?.let(LookCodec::decode),
+                ExportDestination.valueOf(options.optString("destination", ExportDestination.DIRECTORY.name)),
+                options.optJSONObject("frame")?.let(org.openbridge.app.frame.FrameCodec::decodeSnapshot)
             ),
             destinationUri = json.getString("destinationUri"), status = ExportStatus.valueOf(json.getString("status")),
             progress = json.optDouble("progress", 0.0).toFloat(), outputUri = json.stringOrNull("outputUri"), message = json.stringOrNull("message")

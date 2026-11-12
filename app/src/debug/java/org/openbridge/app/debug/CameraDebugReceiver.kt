@@ -33,6 +33,7 @@ class CameraDebugReceiver : BroadcastReceiver() {
                 put("candidateCount", ble.cameras.size); put("message", ble.message); put("history", JSONArray(ble.history))
                 put("clientName", ble.clientName); put("wifiRequested", ble.wifiRequested)
                 put("wifiConnected", camera.state.value.connected); put("wifiConnecting", camera.state.value.connecting)
+                put("wifiPhase", camera.state.value.connectionPhase.name); put("bluetoothEnabled", ble.adapterEnabled)
                 put("wifiMessage", camera.state.value.message); put("automatic", camera.autoState.value.message)
                 put("checking", camera.autoState.value.checking); put("checkResult", camera.autoState.value.lastCheckResult)
             }.toString()

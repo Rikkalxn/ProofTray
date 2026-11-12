@@ -19,8 +19,10 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.ScheduledFuture
+import java.net.SocketTimeoutException
 import org.json.JSONObject
-import org.openbridge.app.data.BluetoothRole
+import org.openbridge.app.domain.BluetoothRole
 
 /** Short-lived classic Bluetooth data connection. BLE remains the separate, low-duty-cycle control channel. */
 @SuppressLint("MissingPermission")
@@ -46,6 +48,7 @@ internal class BluetoothLssLink(context: Context, private val address: String, p
     lateinit var device: JSONObject
         private set
     private var operations = emptySet<Int>()
+    @Volatile private var sessionOpened = false
 
     fun prepare() {
         require(role != BluetoothRole.AUTOMATIC) { "蓝牙连接方向尚未确定" }
@@ -53,7 +56,7 @@ internal class BluetoothLssLink(context: Context, private val address: String, p
         check(adapter != null && adapter.isEnabled) { "手机蓝牙未开启" }
         check(adapter.getRemoteDevice(address).bondState == BluetoothDevice.BOND_BONDED) { "请先在系统中配对所选传图设备" }
         if (role == BluetoothRole.WAIT_FOR_CAMERA) {
-            server = adapter.listenUsingRfcommWithServiceRecord("OpenBridge", UUID.fromString("00001101-0000-1000-8000-00805f9b34fb"))
+            server = adapter.listenUsingRfcommWithServiceRecord("ProofTray", UUID.fromString("00001101-0000-1000-8000-00805f9b34fb"))
             if (closed) { server?.close(); error("蓝牙传图准备已取消") }
         }
     }
@@ -90,6 +93,7 @@ internal class BluetoothLssLink(context: Context, private val address: String, p
             val values = device.getJSONArray("operations")
             operations = (0 until values.length()).map { values.getInt(it) }.toSet()
             command(0x1002, longArrayOf(1))
+            sessionOpened = true
             Log.i("OpenBridgeBluetooth", "Bluetooth PTP session opened")
         } catch (error: Exception) {
             close()
@@ -134,6 +138,13 @@ internal class BluetoothLssLink(context: Context, private val address: String, p
     }
 
     fun finishAutomatic() { command(0x9520, longArrayOf(0x22)) }
+
+    fun finishSession() {
+        if (!sessionOpened || closed) return
+        sessionOpened = false
+        try { command(0x1003, timeoutSeconds = 2) }
+        catch (error: Exception) { Log.i("OpenBridgeBluetooth", "PTP close not acknowledged; closing owned data socket", error) }
+    }
     fun objectInfo(handle: Long): JSONObject = JSONObject(NativePtp.info(command(0x1008, longArrayOf(handle)), false))
 
     fun pendingImages(): BluetoothTransferSelection = bluetoothTransferSelection(command(0x9521, longArrayOf(0)))
@@ -152,25 +163,29 @@ internal class BluetoothLssLink(context: Context, private val address: String, p
     }
 
     @Synchronized
-    private fun command(operation: Int, parameters: LongArray = longArrayOf()): ByteArray {
+    private fun command(operation: Int, parameters: LongArray = longArrayOf(), timeoutSeconds: Long = 30): ByteArray {
         check(!closed && parameters.size <= 5) { "蓝牙传图会话已关闭" }
         val id = transaction++
         val pending = Reply(operation, id)
         reply = pending
+        var alarm: ScheduledFuture<*>? = null
         try {
+            alarm = timeout.schedule({
+                if (reply === pending && pending.result.completeExceptionally(SocketTimeoutException("蓝牙操作 0x${operation.toString(16)} 超时"))) close()
+            }, timeoutSeconds, TimeUnit.SECONDS)
             val size = 12 + parameters.size * 4
             val packet = ByteBuffer.allocate(8 + size).order(ByteOrder.LITTLE_ENDIAN)
                 .putShort(0xa5a5.toShort()).put(1).put(1).putInt(size)
                 .putInt(size).putShort(1).putShort(operation.toShort()).putInt(id.toInt())
             parameters.forEach { packet.putInt(it.toInt()) }
             socket!!.outputStream.apply { write(packet.array()); flush() }
-            return pending.result.get(30, TimeUnit.SECONDS)
+            return pending.result.get(timeoutSeconds, TimeUnit.SECONDS)
         } catch (error: Exception) {
             val cause = if (error is ExecutionException) error.cause else error
             if (cause is PtpResponseException && cause.receivedBytes == 0L) throw cause
             close()
             throw IOException("蓝牙操作 0x${operation.toString(16)} 失败：${error.cause?.message ?: error.message}", error)
-        } finally { if (reply === pending) reply = null }
+        } finally { alarm?.cancel(false); if (reply === pending) reply = null }
     }
 
     private fun readResponses() {

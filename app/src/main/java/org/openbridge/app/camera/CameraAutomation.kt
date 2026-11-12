@@ -30,7 +30,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.openbridge.app.data.AppSettingsRepository
-import org.openbridge.app.data.BluetoothRole
+import org.openbridge.app.domain.BluetoothRole
 import org.openbridge.app.data.PhotoRepository
 import org.openbridge.app.domain.AutoDownloadKind
 import org.openbridge.app.domain.NewObjectTracker
@@ -65,28 +65,36 @@ internal class CameraAutomation(
     private val bluetooth = AtomicReference<ActiveTransfer?>(null)
     private val bluetoothTransfers = Mutex()
     private val retryVersion = AtomicInteger()
+    private val transferIntent = AtomicInteger()
+    private val transferRetry = BluetoothRetryBudget()
+    private val manualRetryFinished = Channel<Unit>(Channel.CONFLATED)
     private val standbyFailures = AtomicInteger()
     private val nextStandbyConnect = AtomicLong()
     private val standbyAllowed = MutableStateFlow(true)
     private var backgroundState = AutoDownloadState()
-    private val repository = PhotoRepository(context)
-    private class TransferPaused : Exception("下载队列已暂停，请先恢复队列")
-    private data class WifiStatus(val connected: Boolean, val connecting: Boolean, val generation: Int)
-    private data class BleControl(val ready: Boolean, val address: String, val wifiRequested: Boolean, val allowReconnect: Boolean = true)
+    private val repository = PhotoRepository.get(context)
+    private class TransferPaused : Exception("导入队列已暂停，请先恢复队列")
+    private data class WifiStatus(val connected: Boolean, val connecting: Boolean, val generation: Int, val manuallyDisconnected: Boolean)
+    private data class BleControl(
+        val ready: Boolean, val address: String, val wifiRequested: Boolean, val allowReconnect: Boolean = true,
+        val adapterEnabled: Boolean = true, val scanning: Boolean = false
+    )
     private val bluetoothHandoff = MutableStateFlow<BleControl?>(null)
 
     init {
         scope.launch {
             val policy = settings.state.map {
                 val bluetooth = it.autoKind == AutoDownloadKind.CAMERA_JPEG
-                Policy(it.autoDownload, it.autoKind, if (bluetooth) it.controlAddress else "",
+                Policy(it.automaticEnabled, it.autoKind, if (bluetooth) it.controlAddress else "",
                     if (bluetooth) it.transferAddress else "", if (bluetooth) it.bluetoothRole else BluetoothRole.CONNECT_TO_CAMERA)
             }.distinctUntilChanged()
-            val connection = host.camera.map { WifiStatus(it.connected, it.connecting, it.generation) }.distinctUntilChanged()
+            val connection = host.camera.map {
+                WifiStatus(it.connected, it.connecting, it.generation, it.manuallyDisconnected)
+            }.distinctUntilChanged()
             val control = combine(host.ble.state, bluetoothHandoff, standbyAllowed) { current, handoff, allowed ->
-                handoff?.copy(wifiRequested = current.wifiRequested, allowReconnect = allowed) ?: BleControl(
+                handoff?.copy(wifiRequested = current.wifiRequested, allowReconnect = allowed, adapterEnabled = current.adapterEnabled) ?: BleControl(
                     bluetoothDataReady(current.authenticated, current.systemPaired, current.pairingInProgress),
-                    current.connectedAddress, current.wifiRequested, allowed)
+                    current.connectedAddress, current.wifiRequested, allowed, current.adapterEnabled, current.scanning)
             }
                 .distinctUntilChanged()
             combine(policy, connection, control) { value, wifi, ble ->
@@ -98,15 +106,19 @@ internal class CameraAutomation(
                     val controlState = control ?: BleControl(false, "", false)
                     try {
                         when {
-                            !value.enabled -> report(false, "自动下载未开启")
+                            !value.enabled -> report(false, "自动导入未开启")
+                            wifi.manuallyDisconnected -> report(false, "相机已断开，重新连接后恢复自动导入")
                             value.kind == AutoDownloadKind.CAMERA_JPEG -> {
-                                if (wifiHasPriority(controlState.wifiRequested, wifi.connecting, wifi.connected)) {
+                                if (!controlState.adapterEnabled) report(false, "手机蓝牙已关闭，开启后恢复待传监听")
+                                else if (wifiHasPriority(controlState.wifiRequested, wifi.connecting, wifi.connected)) {
                                     report(false, "Wi-Fi 优先，蓝牙自动传图暂候")
+                                } else if (controlState.scanning) {
+                                    report(false, "正在搜索相机，自动接收暂候")
                                 } else if (value.control.isBlank() || value.transfer.isBlank()) report(false, "请先关联相机控制和传图设备")
                                 else if (!controlState.ready || controlState.address != value.control) {
                                     when {
                                         host.ble.state.value.pairingInProgress -> report(false, "正在恢复相机控制连接")
-                                        !controlState.allowReconnect -> report(false, "蓝牙已手动断开，重新连接后恢复自动下载")
+                                        !controlState.allowReconnect -> report(false, "蓝牙已手动断开，重新连接后恢复自动导入")
                                         else -> watchBluetoothStandby()
                                     }
                                 }
@@ -114,20 +126,26 @@ internal class CameraAutomation(
                             }
                             else -> {
                                 val session = host.wifiSession()
-                                if (session == null) report(false, "原图自动下载等待 Wi-Fi 连接") else watchWifi(session, value)
+                                if (session == null) report(false, "原片自动导入等待 Wi-Fi 连接") else watchWifi(session, value)
                             }
                         }
                     } catch (cancelled: CancellationException) { throw cancelled }
-                    catch (error: Exception) { report(false, "自动下载已停止：${error.message}") }
+                    catch (error: Exception) { report(false, "自动导入已停止：${error.message}") }
                     finally { cancelAutomaticBluetooth() }
                 }
         }
     }
 
     fun allowStandbyReconnect(allowed: Boolean) {
-        if (allowed) { standbyFailures.set(0); nextStandbyConnect.set(0) }
+        if (allowed) { standbyFailures.set(0); nextStandbyConnect.set(0); transferRetry.reset() }
         standbyAllowed.value = allowed
     }
+
+    fun canReconnectAutomatically(): Boolean = !settings.state.value.sonySelected && standbyAllowed.value && host.ble.state.value.adapterEnabled &&
+        !host.ble.state.value.pairingInProgress && !state.value.checking && !transferRetry.state().exhausted &&
+        !host.ble.state.value.scanning && !host.ble.state.value.wifiRequested && !host.camera.value.connected &&
+        !host.camera.value.connecting && !host.camera.value.manuallyDisconnected &&
+        settings.state.value.autoDownload && settings.state.value.autoKind == AutoDownloadKind.CAMERA_JPEG
 
     private suspend fun watchBluetoothStandby() {
         val name = settings.state.value.controlName
@@ -137,7 +155,10 @@ internal class CameraAutomation(
             return
         }
         while (standbyFailures.get() < 3) {
+            val retry = transferRetry.state()
+            if (retry.exhausted) { report(false, retry.blockedReason ?: "蓝牙传输连续失败，请检查连接后手动重试"); return }
             delay((nextStandbyConnect.get() - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+            delay(transferRetry.state().delayMillis(SystemClock.elapsedRealtime()))
             report(true, "BLE 已断开，低功耗等待所选相机的待传广播")
             val camera = host.ble.awaitTransferAdvertisement(setOf(name))
             if (host.ble.state.value.pairingInProgress || state.value.checking) return
@@ -167,6 +188,7 @@ internal class CameraAutomation(
     @Synchronized
     fun finishManualCheck(result: String) {
         mutableState.value = backgroundState.copy(lastCheckMillis = System.currentTimeMillis(), lastCheckResult = result)
+        if (transferRetry.state().failures > 0) manualRetryFinished.trySend(Unit)
     }
 
     suspend fun checkBluetoothOnce(): String {
@@ -176,6 +198,7 @@ internal class CameraAutomation(
     }
 
     fun cancelActiveBluetooth() {
+        transferIntent.incrementAndGet()
         bluetooth.getAndSet(null)?.connection?.close()
         bluetoothHandoff.value = null
     }
@@ -194,17 +217,17 @@ internal class CameraAutomation(
         val tracker = NewObjectTracker()
         val attempts = mutableMapOf<Long, Int>()
         var retrySoon = false
-        report(true, "正在记录已有文件；准备完成后只自动下载新拍照片")
+        report(true, "正在记录已有文件；准备完成后只自动导入新拍照片")
         val initial = host.handles(session)
         tracker.observe(initial.handles, initial.revision)
-        report(true, "已就绪：只下载本次连接后新增的原片")
+        report(true, "已就绪：只导入本次连接后新增的原片")
         while (session.link.connected) {
             val waitSeconds = if (retrySoon) 5 else settings.state.value.powerProfile.pollSeconds
             session.link.awaitCatalogChange(waitSeconds * 1000L)
             retrySoon = false
             delay(600) // Merge bursts and allow RAW/JPEG pairs to finish writing.
             currentCoroutineContext().ensureActive()
-            if (host.camera.value.paused) { report(true, "自动下载已暂停"); continue }
+            if (host.camera.value.paused) { report(true, "自动导入已暂停"); continue }
             val pendingTasks = host.camera.value.tasks.count {
                 it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
             }
@@ -233,7 +256,7 @@ internal class CameraAutomation(
             report(true, when {
                 retrySoon -> "相机正在写入新照片，稍后重试"
                 batch.isEmpty() -> "等待新拍照片"
-                else -> "新增 ${batch.size} 项已加入原图下载队列"
+                else -> "新增 ${batch.size} 项已加入原片导入队列"
             })
         }
     }
@@ -242,42 +265,52 @@ internal class CameraAutomation(
         standbyFailures.set(0)
         val triggers = Channel<Unit>(Channel.CONFLATED)
         val notifications = launch { host.ble.transferRequests.collect { triggers.trySend(Unit) } }
+        val manualFinished = launch { for (signal in manualRetryFinished) triggers.trySend(Unit) }
         // A request may predate the notification subscription, especially after manual pairing or reconnecting.
         triggers.trySend(Unit)
-        var failures = 0
-        var retryAt = 0L
-        var version = retryVersion.get()
         var retryJob: Job? = null
         report(true, "蓝牙已就绪，正在检查相机待传照片")
         Log.i("OpenBridgeBluetooth", "automatic check scheduled: control connection ready")
         try {
             for (signal in triggers) {
                 if (state.value.checking) continue
-                if (version != retryVersion.get()) { version = retryVersion.get(); failures = 0; retryAt = 0 }
-                if (failures >= 3) { report(true, "蓝牙传图连续失败，已停止自动尝试；请检查设备关联后手动重试"); continue }
-                if (SystemClock.elapsedRealtime() < retryAt) continue
+                val retry = transferRetry.state()
+                if (retry.exhausted) { report(false, retry.blockedReason ?: "蓝牙传图连续失败，已停止自动尝试；请手动重试"); continue }
                 retryJob?.cancel()
                 retryJob = null
+                val remaining = retry.delayMillis(SystemClock.elapsedRealtime())
+                if (remaining > 0) {
+                    report(true, "蓝牙传图未完成，稍后重试（${retry.failures}/3）")
+                    retryJob = launch { delay(remaining); triggers.trySend(Unit) }
+                    continue
+                }
                 if (host.camera.value.paused) {
-                    report(true, "蓝牙自动下载已暂停")
+                    report(true, "蓝牙自动导入已暂停")
                     host.camera.first { !it.paused }
                 }
+                val failuresBeforeAttempt = transferRetry.state().failures
                 try {
                     val result = transferBluetoothBatch(policy, manual = false) { report(true, it) }
-                    failures = 0
-                    if (result != null) report(true, result)
+                    if (result != null) report(!transferRetry.state().exhausted, result)
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (_: TransferPaused) { report(true, "蓝牙已暂停，关闭数据连接并保留待传照片"); triggers.trySend(Unit) }
                 catch (error: Exception) {
-                    failures++
-                    Log.w("OpenBridgeBluetooth", "automatic transfer attempt=$failures failed", error)
-                    report(true, "蓝牙传图未完成（$failures/3）：${error.message}")
-                    val backoff = settings.state.value.powerProfile.pollSeconds * 1000L
-                    retryAt = SystemClock.elapsedRealtime() + backoff
-                    if (failures < 3) retryJob = launch { delay(backoff); triggers.trySend(Unit) }
+                    if (!host.ble.state.value.adapterEnabled || host.ble.state.value.wifiRequested || !settings.state.value.autoDownload ||
+                        settings.state.value.autoKind != policy.kind) {
+                        throw CancellationException("自动传输策略已改变").also { it.initCause(error) }
+                    }
+                    val previous = transferRetry.state()
+                    val failure = if (previous.failures == failuresBeforeAttempt) {
+                        transferRetry.failed(SystemClock.elapsedRealtime(), settings.state.value.powerProfile.pollSeconds * 1000L)
+                    } else previous
+                    Log.w("OpenBridgeBluetooth", "automatic transfer attempt=${failure.failures} failed", error)
+                    report(!failure.exhausted, "蓝牙传图未完成（${failure.failures}/3）：${error.message}")
+                    if (!failure.exhausted) retryJob = launch {
+                        delay(failure.delayMillis(SystemClock.elapsedRealtime()).coerceAtLeast(1000)); triggers.trySend(Unit)
+                    }
                 }
             }
-        } finally { notifications.cancel(); retryJob?.cancel(); triggers.close() }
+        } finally { notifications.cancel(); manualFinished.cancel(); retryJob?.cancel(); triggers.close() }
     }
 
     private suspend fun transferBluetoothBatch(policy: Policy, manual: Boolean, progress: (String) -> Unit): String? = bluetoothTransfers.withLock {
@@ -297,6 +330,9 @@ internal class CameraAutomation(
         val connection = BluetoothLssLink(context, policy.transfer, host.ble.transferRole(policy.role))
         val active = ActiveTransfer(connection, manual)
         bluetooth.set(active)
+        val intent = transferIntent.get()
+        val retryEpoch = retryVersion.get()
+        setTransferring(true)
         var handedOff = false
         try {
             progress("正在建立蓝牙数据通道并读取待传列表")
@@ -351,15 +387,28 @@ internal class CameraAutomation(
             }
             if (allSupported) connection.finishAutomatic()
             host.ble.acknowledgeTransferRequest()
+            transferRetry.reset()
+            if (!allSupported) transferRetry.block("待传列表中有未处理的项目；请在机身确认标记后手动检查，自动尝试已暂停")
             val result = when {
-                !allSupported -> "本批下载 $downloaded 张；其他照片保留在相机待传列表"
+                !allSupported -> "本批导入 $downloaded 张；未处理项目保留，自动尝试已暂停，请确认机身标记后重试"
                 handles.isEmpty() -> "相机待传列表为空；新照片需在相机启用自动选择发送"
-                downloaded == 0 -> "待传照片已导入，无需重复下载；已回到 BLE 待机"
-                else -> "本批下载 $downloaded 张便携 JPEG，已回到 BLE 待机"
+                downloaded == 0 -> "待传照片已导入，无需重复导入；已回到 BLE 待机"
+                else -> "本批导入 $downloaded 张便携 JPEG，已回到 BLE 待机"
             }
-            report(settings.state.value.autoDownload, result)
+            report(settings.state.value.autoDownload && !transferRetry.state().exhausted, result)
             result
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (paused: TransferPaused) { throw paused }
+        catch (error: Exception) {
+            val current = settings.state.value
+            if (transferIntent.get() != intent || !host.ble.state.value.adapterEnabled || host.ble.state.value.wifiRequested ||
+                (!manual && (!current.autoDownload || current.autoKind != policy.kind || current.transferAddress != policy.transfer))) {
+                throw CancellationException("蓝牙传输已取消或让位给其他连接").also { it.initCause(error) }
+            }
+            if (retryVersion.get() == retryEpoch) transferRetry.failed(SystemClock.elapsedRealtime(), current.powerProfile.pollSeconds * 1000L)
+            throw error
         } finally {
+            if (bluetooth.get() === active && currentCoroutineContext().isActive) connection.finishSession()
             connection.close()
             try {
                 if (handedOff && currentCoroutineContext().isActive && bluetooth.get() === active && !host.ble.state.value.wifiRequested) {
@@ -375,6 +424,7 @@ internal class CameraAutomation(
             finally {
                 bluetooth.compareAndSet(active, null)
                 if (handedOff) bluetoothHandoff.value = null
+                setTransferring(false)
                 if (wake.isHeld) wake.release()
             }
         }
@@ -385,6 +435,11 @@ internal class CameraAutomation(
         val names = setOf(previous.cameraName, previous.serverName).filter(String::isNotBlank).toSet()
         for (attempt in 0..1) {
             try {
+                val wifi = host.camera.value
+                if (wifi.manuallyDisconnected || settings.state.value.sonySelected ||
+                    wifiHasPriority(host.ble.state.value.wifiRequested, wifi.connecting, wifi.connected)) {
+                    throw CancellationException("当前操作已结束蓝牙待机恢复")
+                }
                 val restored = host.ble.connect(address, preserveHistory = true).await()
                 check(cameraSerialMatches(cameraSerial(restored.serialNumber), cameraSerial(previous.serialNumber))) {
                     "恢复待机时相机身份不一致，请重新关联"
@@ -401,8 +456,14 @@ internal class CameraAutomation(
     }
 
     @Synchronized
+    private fun setTransferring(value: Boolean) {
+        backgroundState = backgroundState.copy(transferring = value)
+        mutableState.value = state.value.copy(transferring = value)
+    }
+
+    @Synchronized
     private fun report(watching: Boolean, message: String) {
-        backgroundState = AutoDownloadState(watching, message, System.currentTimeMillis())
+        backgroundState = AutoDownloadState(watching, message, System.currentTimeMillis(), transferring = state.value.transferring)
         if (!state.value.checking) mutableState.value = backgroundState.copy(lastCheckResult = state.value.lastCheckResult)
     }
 }

@@ -1,60 +1,67 @@
 package org.openbridge.app.ui
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.background
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Badge
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MediumTopAppBar
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import org.openbridge.app.camera.DownloadStatus
+import org.openbridge.app.domain.FilterSpec
 import org.openbridge.app.domain.DownloadState
 import org.openbridge.app.domain.ExportStatus
-import org.openbridge.app.domain.MediaFormat
+import org.openbridge.app.domain.ExportVersions
+import org.openbridge.app.domain.LibrarySection
 import org.openbridge.app.domain.PhotoCollection
+import org.openbridge.app.domain.canEdit
+import org.openbridge.app.domain.PhotoEditTab
+import org.openbridge.app.domain.ExportDialogDraft
 import org.openbridge.app.domain.PhotoAsset
+import org.openbridge.app.domain.hasConditions
+import org.openbridge.app.domain.ColorLookSettings
+import org.openbridge.app.domain.MediaFormat
 
-private enum class MainTab(val title: String, val glyph: BridgeGlyph, val collection: PhotoCollection? = null) {
-    LIBRARY("图库", BridgeGlyph.PHOTOS, PhotoCollection.LIBRARY),
-    IMPORT("导入", BridgeGlyph.DOWNLOAD, PhotoCollection.CAMERA_IMPORT),
-    CAMERA("相机", BridgeGlyph.CAMERA), TASKS("任务", BridgeGlyph.TASKS), SETTINGS("设置", BridgeGlyph.SETTINGS)
-}
+private fun PhotoAsset.deletable(): Boolean = downloadState == DownloadState.DOWNLOADED && uri.startsWith("content:")
 
 @Composable
 fun LibraryScreen(state: LibraryUiState, actions: LibraryActions, showAboutOnStart: Boolean = false) {
     CompositionLocalProvider(LocalCameraPreviewRequest provides actions.onRequestPreview,
-        LocalCameraSessionGeneration provides state.camera.generation) {
+        LocalCameraSessionGeneration provides state.camera.generation, LocalPhotoGeometryUpdate provides actions.onPreviewGeometry) {
         OpenBridgeTheme { LibraryContent(state, actions, showAboutOnStart) }
     }
 }
@@ -62,145 +69,253 @@ fun LibraryScreen(state: LibraryUiState, actions: LibraryActions, showAboutOnSta
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun LibraryContent(state: LibraryUiState, actions: LibraryActions, showAboutOnStart: Boolean) {
-    var tab by rememberSaveable { mutableStateOf(0) }
+    var tab by rememberSaveable(stateSaver = MainTabSaver) { mutableStateOf(MainTab.LIBRARY) }
     var showingAbout by rememberSaveable { mutableStateOf(showAboutOnStart) }
     var showingFilters by remember { mutableStateOf(false) }
     var showingSaveFilter by remember { mutableStateOf(false) }
     var showingSavedFilters by remember { mutableStateOf(false) }
-    var showingExport by remember { mutableStateOf(false) }
+    val exportIds = state.exportIds
+    var showingCamera by rememberSaveable { mutableStateOf(false) }
+    var cameraPanel by remember { mutableStateOf<CameraPanel?>(null) }
+    var registering by rememberSaveable { mutableStateOf(false) }
+    fun openCamera(panel: CameraPanel? = null) { cameraPanel = panel; showingCamera = true }
+    val view = LocalView.current
+    val connectionBusy = cameraConnectionSummary(state).busy
+    DisposableEffect(view, connectionBusy) {
+        val previous = view.keepScreenOn
+        view.keepScreenOn = previous || connectionBusy
+        onDispose { view.keepScreenOn = previous }
+    }
     var deleting by remember { mutableStateOf<List<PhotoAsset>?>(null) }
     var cleanup by remember { mutableStateOf<CatalogCleanup?>(null) }
     var previewId by rememberSaveable { mutableStateOf<String?>(null) }
     val importing = state.browser.collection == PhotoCollection.CAMERA_IMPORT
     var showingColorLibrary by remember { mutableStateOf(false) }
-    var colorAssetId by rememberSaveable { mutableStateOf<String?>(null) }
+    val editing = state.editor
+    val snackbar = remember { SnackbarHostState() }
+    val noticeScope = rememberCoroutineScope()
     var showingTags by remember { mutableStateOf(false) }
     var comparing by remember { mutableStateOf<List<String>>(emptyList()) }
     var expandedGroupId by remember { mutableStateOf<String?>(null) }
     var menu by remember { mutableStateOf(false) }
-    val page = MainTab.entries.getOrElse(tab) { MainTab.LIBRARY }
+    // Armed by the "选择" button before the first photo is picked; afterwards the selection itself keeps the mode.
+    var selectMode by rememberSaveable { mutableStateOf(false) }
+    val page = tab
+    val exports = page == MainTab.LIBRARY && state.browser.librarySection == LibrarySection.EXPORTS
+    val exportSource = state.browser.exportSourceId.takeIf { exports }
+    val listName = if (exportSource != null) "这张原片的导出" else state.browser.librarySection.label
+    fun browseLibrary(section: LibrarySection, source: String? = null) {
+        previewId = null
+        expandedGroupId = null
+        selectMode = false
+        tab = MainTab.LIBRARY
+        actions.onSetLibrarySection(section, source)
+    }
     fun navigate(destination: MainTab) {
+        if (destination == MainTab.LIBRARY) { browseLibrary(LibrarySection.ORIGINALS); return }
         destination.collection?.let(actions.onSetCollection)
-        tab = destination.ordinal
+        selectMode = false
+        tab = destination
     }
     LaunchedEffect(state.browser.collection) {
-        if (MainTab.entries.getOrNull(tab)?.collection != null) {
-            tab = if (state.browser.collection == PhotoCollection.LIBRARY) MainTab.LIBRARY.ordinal else MainTab.IMPORT.ordinal
+        if (tab.collection != null) {
+            tab = if (state.browser.collection == PhotoCollection.LIBRARY) MainTab.LIBRARY else MainTab.IMPORT
         }
     }
+    LaunchedEffect(state.selectedIds.isNotEmpty()) { if (state.selectedIds.isNotEmpty()) selectMode = false }
     val holder = rememberSaveableStateHolder()
+    val originalOf = rememberOriginalState(state)
     val selected = remember(state.assets, state.selectedIds) { state.assets.filter { it.id in state.selectedIds } }
-    val colorAsset = selected.firstOrNull {
-        it.downloadState == DownloadState.DOWNLOADED && it.format in setOf(MediaFormat.JPEG, MediaFormat.PNG, MediaFormat.HEIF)
+    val canEditSelection = selected.isNotEmpty() && selected.all { it.canEdit }
+    fun openEditor(
+        target: PhotoEditTab, preferred: PhotoAsset? = null, export: ExportDialogDraft? = null, targets: List<PhotoAsset>? = null
+    ) {
+        val photos = targets ?: preferred?.let { listOf(it) } ?: selected
+        if (photos.isEmpty() || photos.any { !it.canEdit }) return
+        val first = preferred ?: photos.firstOrNull { it.canEdit } ?: return
+        previewId = null
+        val look = state.look.takeIf { !it.usesLog || photos.all { photo -> photo.format == MediaFormat.RAW } } ?: ColorLookSettings()
+        actions.onSetEditor(PhotoEditorState(photos.map { it.id }, first.id, target, look, state.frame, export, state.deletedFrameTemplateIds))
     }
+
+    val tiles = remember(state.catalog) { state.catalog.groups.map { it.members.first() } }
     val visibleIds = remember(state.catalog) { state.catalog.groups.flatMap { it.members }.map { it.id }.toSet() }
+    val visibleSelected = remember(state.catalog, state.selectedIds) {
+        state.catalog.groups.flatMap { it.members }.distinctBy { it.id }.filter { it.id in state.selectedIds }
+    }
     val hiddenCount = selected.count { it.id !in visibleIds }
-    val canDelete = selected.isNotEmpty() && selected.all { it.downloadState == DownloadState.DOWNLOADED && it.uri.startsWith("content:") }
+    val canDelete = selected.isNotEmpty() && selected.all { it.deletable() }
     val compareAssets = remember(comparing, state.assets) { comparing.mapNotNull { id -> state.assets.find { it.id == id } } }
+    val cached = remember(state.assets) { state.assets.count { it.inImportList } }
+    val filtering = state.filter.hasConditions()
+    val hasPhotos = state.catalog.groups.isNotEmpty()
     val pendingTasks = state.tasks.count { it.status == ExportStatus.QUEUED || it.status == ExportStatus.RUNNING } +
         state.camera.tasks.count { it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING }
     if (showingAbout) {
         AboutScreen(onBack = { showingAbout = false; navigate(MainTab.SETTINGS) })
-        return
     }
-    Scaffold(
+    val selecting = page.collection != null && (selected.isNotEmpty() || selectMode)
+    val exitSelection = { selectMode = false; actions.onClearSelection() }
+    BackHandler(enabled = exportSource != null && !selecting && previewId == null && editing == null) {
+        val source = state.assets.find { it.id == exportSource && !it.hiddenFromLibrary && it.downloadState == DownloadState.DOWNLOADED }
+        browseLibrary(if (source != null) LibrarySection.ORIGINALS else LibrarySection.EXPORTS)
+        previewId = source?.id
+    }
+    BackHandler(enabled = selecting && !showingAbout && !showingCamera, onBack = exitSelection)
+    if (!showingAbout) Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
-            MediumTopAppBar(
-                title = { Text(page.title, fontWeight = FontWeight.SemiBold) },
+            if (page.collection != null) TopAppBar(
+                navigationIcon = { if (selecting) IconButton(onClick = exitSelection) { BridgeIcon(BridgeGlyph.CLOSE, "清除选择") } },
+                title = {
+                    val count = visibleIds.size
+                    Column {
+                        when {
+                            selecting -> {
+                                Text(if (selected.isEmpty()) "选择照片" else "已选 ${selected.size} 张", fontWeight = FontWeight.SemiBold)
+                                if (hiddenCount > 0) Text("含筛选外 $hiddenCount 张", style = MaterialTheme.typography.labelSmall)
+                            }
+                            importing -> Text("$count 张照片", style = MaterialTheme.typography.titleMedium)
+                            !importing && (hasPhotos || filtering) -> Text("$count 张照片", style = MaterialTheme.typography.titleMedium)
+                        }
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
                 actions = {
-                    if (page.collection != null) {
-                        IconButton(onClick = { showingFilters = true }) { BridgeIcon(BridgeGlyph.FILTER, "组合筛选") }
-                        Box {
-                            IconButton(onClick = { menu = true }) { BridgeIcon(BridgeGlyph.MORE, "照片选项") }
-                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                                DropdownMenuItem(text = { Text("添加手机里的照片") }, onClick = { menu = false; actions.onImport() })
-                                DropdownMenuItem(text = { Text("LUT 与预设") }, onClick = { menu = false; showingColorLibrary = true })
-                                DropdownMenuItem(text = { Text("已保存的筛选") }, onClick = { menu = false; showingSavedFilters = true })
-                                DropdownMenuItem(text = { Text("保存当前筛选") }, onClick = { menu = false; showingSaveFilter = true })
-                                DropdownMenuItem(text = { Text("选择全部结果") }, onClick = { menu = false; actions.onSelectVisible() })
-                                DropdownMenuItem(text = { Text(if (importing) "清空本次选片列表" else "清空图库列表") }, onClick = {
-                                    menu = false
-                                    cleanup = if (importing) CatalogCleanup.IMPORT_LIST else CatalogCleanup.LIBRARY_ALL
-                                })
+                    if (selecting) {
+                        TextButton(onClick = { cleanup = if (importing) CatalogCleanup.IMPORT_SELECTED else CatalogCleanup.LIBRARY_SELECTED },
+                            enabled = selected.isNotEmpty()) { Text("移出列表") }
+                        if (!importing || selected.any { it.deletable() }) TextButton(onClick = { deleting = selected.toList() }, enabled = canDelete,
+                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("删除文件") }
+                    } else {
+                        if (hasPhotos) TextButton(onClick = { selectMode = true }) { Text("选择") }
+                        if (hasPhotos || filtering) IconButton(onClick = { showingFilters = true }) {
+                            BadgedBox(badge = { if (filtering) Badge() }) {
+                                BridgeIcon(BridgeGlyph.FILTER, if (filtering) "调整已应用的筛选" else "筛选照片")
                             }
                         }
                     }
-                    if (page == MainTab.CAMERA && state.camera.connected) {
-                        IconButton(onClick = actions.onRefreshCamera, enabled = !state.camera.busy) { BridgeIcon(BridgeGlyph.REFRESH, "刷新相机目录") }
+                    Box {
+                        IconButton(onClick = { menu = true }) { BridgeIcon(BridgeGlyph.MORE, "照片选项") }
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            val grouped = state.catalog.groups.any { group -> group.members.any { it.stackId != null } }
+                            val offline = importing && !state.camera.connected && cached > 0
+                            if (grouped) DropdownMenuItem(text = { Text(if (state.collapseStacks) "展开分组" else "折叠分组") }, onClick = {
+                                menu = false; actions.onSetCollapseStacks(!state.collapseStacks)
+                            })
+                            if (offline) DropdownMenuItem(
+                                text = { Text(if (state.browser.showOfflinePreviews) "收起离线预览" else "查看 $cached 张离线预览") },
+                                onClick = { menu = false; actions.onSetOfflinePreviews(!state.browser.showOfflinePreviews) })
+                            if (grouped || offline) HorizontalDivider()
+                            if (selecting) DropdownMenuItem(text = { Text("筛选照片") }, onClick = { menu = false; showingFilters = true })
+                            DropdownMenuItem(text = { Text("已保存的筛选") }, onClick = { menu = false; showingSavedFilters = true })
+                            DropdownMenuItem(text = { Text("保存当前筛选") }, enabled = filtering,
+                                onClick = { menu = false; showingSaveFilter = true })
+                            HorizontalDivider()
+                            if (page == MainTab.LIBRARY) {
+                                DropdownMenuItem(text = { Text("添加手机照片") }, onClick = { menu = false; actions.onImport() })
+                            }
+                            DropdownMenuItem(enabled = visibleIds.isNotEmpty(), text = { Text("全选当前结果") }, onClick = {
+                                menu = false; actions.onSelectVisible()
+                            })
+                            if (page == MainTab.LIBRARY) DropdownMenuItem(text = { Text("调色与边框管理") },
+                                onClick = { menu = false; showingColorLibrary = true })
+                            HorizontalDivider()
+                            DropdownMenuItem(text = {
+                                Text(if (importing) "清空本次选片列表" else "清空${listName}列表", color = MaterialTheme.colorScheme.error)
+                            }, onClick = {
+                                menu = false
+                                cleanup = if (importing) CatalogCleanup.IMPORT_LIST else CatalogCleanup.LIBRARY_ALL
+                            })
+                        }
                     }
                 }
             )
         },
         bottomBar = {
-            Column {
-                AnimatedVisibility(page.collection != null && selected.isNotEmpty()) {
-                    SelectionBar(selected.size, hiddenCount, actions,
-                        onCompare = { if (selected.size == 1) previewId = selected.single().id else comparing = selected.map { it.id } },
-                        onExport = { showingExport = true }, onTags = { showingTags = true },
-                        canGrade = colorAsset != null, onGrade = { colorAssetId = colorAsset?.id }, importing = importing,
-                        batchLimit = state.camera.catalogBatchSize,
-                        onRemove = { cleanup = if (importing) CatalogCleanup.IMPORT_SELECTED else CatalogCleanup.LIBRARY_SELECTED },
-                        canDelete = canDelete, onDelete = { deleting = selected.toList() })
+            if (selecting) {
+                Column {
+                    if (!importing) EditSessionBar(state, actions, canEditSelection) { openEditor(it) }
+                    SelectionBar(selected.size, visibleSelected, actions, importing, state.camera.connected, state.camera.catalogBatchSize,
+                    state.settings.effectiveManualVariant, canGrade = canEditSelection, canUngroup = selected.any { it.stackId != null },
+                    onPromote = if (exports) ({ actions.onPromoteExports(state.selectedIds) }) else null,
+                    onCompare = { if (selected.size == 1) previewId = selected.single().id else comparing = selected.map { it.id } },
+                    onExport = { actions.onSetExportSelection(selected.map { it.id }) },
+                    onTags = { showingTags = true }, onGrade = { openEditor(PhotoEditTab.COLOR) },
+                    onFrame = { openEditor(PhotoEditTab.FRAME) },
+                    onCamera = { openCamera() })
                 }
-                NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 0.dp) {
-                    MainTab.entries.forEach { destination ->
-                        NavigationBarItem(selected = page == destination, onClick = { navigate(destination) },
-                            label = { Text(destination.title) }, icon = {
-                            BadgedBox(badge = { if (destination == MainTab.TASKS && pendingTasks > 0) Badge { Text(pendingTasks.toString()) } }) {
-                                BridgeIcon(destination.glyph)
-                            }
-                        })
-                    }
+            } else NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 0.dp) {
+                MainTab.entries.forEach { destination ->
+                    NavigationBarItem(selected = page == destination, onClick = { navigate(destination) },
+                        label = { Text(destination.title) }, icon = {
+                        BadgedBox(badge = { if (destination == MainTab.TASKS && pendingTasks > 0) Badge { Text(pendingTasks.toString()) } }) {
+                            BridgeIcon(destination.glyph)
+                        }
+                    })
                 }
-            }
-        },
-        floatingActionButton = {
-            if (page == MainTab.LIBRARY && state.catalog.groups.isNotEmpty() && selected.isEmpty()) {
-                ExtendedFloatingActionButton(onClick = actions.onImport, icon = { BridgeIcon(BridgeGlyph.ADD) }, text = { Text("添加照片") })
             }
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            state.errorMessage?.let { message ->
-                Surface(Modifier.padding(horizontal = 20.dp, vertical = 8.dp).fillMaxWidth(),
-                    color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.medium) {
-                    Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(message, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                        IconButton(onClick = actions.onDismissError) { BridgeIcon(BridgeGlyph.CLOSE, "关闭提示") }
-                    }
-                }
-            }
-            holder.SaveableStateProvider(tab) {
+            LibraryErrorNotice(state, actions)
+            holder.SaveableStateProvider(tab.name) {
                 when (page) {
-                    MainTab.LIBRARY, MainTab.IMPORT -> PhotoBrowserScreen(state, actions, onCamera = { navigate(MainTab.CAMERA) },
-                        onFilters = { showingFilters = true },
-                        onSavedFilters = { showingSavedFilters = true }, onExpand = { expandedGroupId = it }, onPreview = { previewId = it })
-                    MainTab.CAMERA -> CameraScreen(state, actions) { navigate(MainTab.IMPORT) }
-                    MainTab.TASKS -> TransferScreen(state, actions)
-                    MainTab.SETTINGS -> SettingsScreen(state, actions, onWifiConnection = { navigate(MainTab.CAMERA) },
-                        onAbout = { showingAbout = true })
+                    MainTab.LIBRARY, MainTab.IMPORT -> PhotoBrowserScreen(state, actions, selecting, originalOf,
+                        onLibrarySection = { browseLibrary(it) },
+                        onCamera = ::openCamera, onRegister = { registering = true }, onFilters = { showingFilters = true },
+                        onExpand = { expandedGroupId = it }, onPreview = { previewId = it })
+                    MainTab.TASKS -> TransferScreen(state.transferState(), actions.transferActions())
+                    MainTab.SETTINGS -> SettingsScreen(state, actions, onCamera = { openCamera() },
+                        onAbout = { showingAbout = true }, onManage = { showingColorLibrary = true })
                 }
             }
         }
     }
     if (showingFilters) FilterDialog(state.filter, actions.onFilterChange) { showingFilters = false }
-    if (showingSaveFilter) TextEntryDialog("保存筛选", "给这组条件起个名字", onConfirm = actions.onSaveFilter) { showingSaveFilter = false }
+    if (showingSaveFilter) TextEntryDialog("保存筛选", "名称", onConfirm = actions.onSaveFilter) { showingSaveFilter = false }
     if (showingSavedFilters) SavedFiltersDialog(state, actions) { showingSavedFilters = false }
     if (showingTags) TextEntryDialog("编辑标签", "逗号分隔，将替换所选照片的标签", allowEmpty = true,
         onConfirm = { actions.onSetTags(it.split(',', '，').map(String::trim).filter(String::isNotEmpty).toSet()) }) { showingTags = false }
-    if (showingExport) ExportDialog(selected, state.look, actions.onExport) { showingExport = false }
-    if (showingColorLibrary) ColorLibrarySheet(state, actions, actions.onSetLook) { showingColorLibrary = false }
-    state.assets.find { it.id == colorAssetId }?.let { asset ->
-        ColorEditor(asset, state, actions) { colorAssetId = null }
+    exportIds?.let { ids ->
+        val photos = ids.mapNotNull { id -> state.assets.find { it.id == id } }
+        ExportDialog(photos, state.look, state.frame, state.settings.exportPreferences,
+            onChange = { target, choices -> actions.onSetExportSelection(null); openEditor(target, export = choices, targets = photos) },
+            onExport = { actions.onExportPhotos(ids.toSet(), it) }, onDismiss = { actions.onSetExportSelection(null) })
     }
-    if (compareAssets.size in 2..4) CompareDialog(compareAssets) { comparing = emptyList() }
+    if (showingColorLibrary) ColorManagementScreen(state, actions) { showingColorLibrary = false }
     state.assets.find { it.id == previewId }?.let { photo ->
-        CompareDialog(listOf(photo), state.selectedIds, actions.onToggleSelection) { previewId = null }
+        val versions = remember(state.assets) { ExportVersions(state.assets) }
+        val groupPhotos = state.catalog.groups.find { it.id == expandedGroupId }?.members?.takeIf { members -> members.any { it.id == photo.id } }
+        val viewing = groupPhotos ?: if (tiles.any { it.id == photo.id }) tiles else listOf(photo)
+        PhotoViewer(viewing, photo.id, state.selectedIds, actions.onToggleSelection,
+            detailOf = { originalOf(it).detail }, importing = importing,
+            canImport = { state.camera.connected || (state.settings.effectiveManualVariant == org.openbridge.app.domain.DownloadVariant.ORIGINAL &&
+                it.downloadState == DownloadState.DOWNLOADED) },
+            onRate = { photo, rating -> actions.onRatePhoto(photo.id, rating) },
+            onPick = { photo, pick -> actions.onPickPhoto(photo.id, pick) },
+            onExport = { actions.onSetExportSelection(listOf(it.id)); previewId = null }, onImport = { actions.onDownloadPhoto(it.id) },
+            onCamera = { previewId = null; openCamera() }, onCompare = { comparing = selected.map { it.id } },
+            versionCount = { asset -> if (page == MainTab.LIBRARY && asset.derivedFromId == null) versions.forSource(asset.id).size else 0 },
+            onShowVersions = { browseLibrary(LibrarySection.EXPORTS, it.id) },
+            onPromote = if (exports) ({ asset -> actions.onPromoteExports(setOf(asset.id)); previewId = null }) else null,
+            canEdit = { page == MainTab.LIBRARY && it.canEdit }, onEdit = { asset ->
+                openEditor(PhotoEditTab.COLOR, asset)
+            }, onFrame = { asset ->
+                openEditor(PhotoEditTab.FRAME, asset)
+            }, onDismiss = { previewId = null })
+    }
+    if (compareAssets.size in 2..4) CompareDialog(compareAssets, state.selectedIds, actions.onToggleSelection) { comparing = emptyList() }
+    editing?.let { request ->
+        val photos = request.ids.mapNotNull { id -> state.assets.find { it.id == id } }
+        if (photos.isEmpty()) LaunchedEffect(request) {
+            actions.onSetEditor(null)
+            noticeScope.launch { snackbar.showSnackbar("照片已移除，编辑已关闭") }
+        } else key(request) { PhotoEditScreen(photos, request, state, actions) { actions.onSetEditor(null) } }
     }
     cleanup?.let { action ->
-        CatalogCleanupDialog(action, onConfirm = {
+        CatalogCleanupDialog(action, listName, onConfirm = {
             if (action == CatalogCleanup.IMPORT_LIST) actions.onClearImportList()
             else if (action == CatalogCleanup.IMPORT_SELECTED) actions.onRemoveFromImport()
             else actions.onRemoveFromLibrary(action == CatalogCleanup.LIBRARY_ALL)
@@ -210,8 +325,14 @@ private fun LibraryContent(state: LibraryUiState, actions: LibraryActions, showA
     deleting?.let { assets ->
         DeletePhotosDialog(assets, onConfirm = { actions.onDeletePhotos(assets); deleting = null }) { deleting = null }
     }
-    state.catalog.groups.find { it.id == expandedGroupId }?.let { group ->
-        GroupDialog(group, state.selectedIds, actions.onToggleSelection) { expandedGroupId = null }
+    if (previewId == null && editing == null && exportIds == null && comparing.isEmpty()) {
+        state.catalog.groups.find { it.id == expandedGroupId }?.let { group ->
+            GroupDialog(group, state.selectedIds, actions.onToggleSelection, originalOf, onPreview = { previewId = it }) { expandedGroupId = null }
+        }
     }
-}
+    if (showingCamera) CameraConnectionPage(state, actions, cameraPanel,
+        onBrowse = { showingCamera = false; navigate(MainTab.IMPORT) }, onRegister = { registering = true },
+        onDismiss = { showingCamera = false; actions.onStopBleScan() })
+    CameraRegistrationDialogs(state, actions, registering) { registering = false }
 
+}

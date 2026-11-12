@@ -63,9 +63,9 @@ int main() {
     std::array<uint8_t, 17> confirmation{4, 0, 0, 0, 0, 0, 0, 0, 0, '1', '2', '3', '4', '5', '6', '7', 0};
     const std::vector<uint8_t> stage3{3, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
                                     0xe8, 0xdf, 0x23, 0x32, 0x25, 0xd1, 0xb5, 0xea};
-    const std::vector<uint8_t> key{0xa9, 0x4a, 0x87, 0xd5, 0x7c, 0x75, 0x04, 0x9e};
+    const std::vector<uint8_t> key{0x7c, 0xb0, 0x48, 0x1b, 0xf3, 0x54, 0x6e, 0x55};
     Check(openbridge::NikonPairingReply(start, challenge) == stage3, "Stage 3 must match the independent CBC-MAC fixture");
-    Check(openbridge::NikonPairingSessionKey(start, challenge, confirmation) == key, "Session key must bind both device IDs and nonce halves");
+    Check(openbridge::NikonPairingSessionKey(start, challenge, confirmation) == key, "Session key must use the verified variant in the nonce prefix");
     std::fill(confirmation.begin() + 1, confirmation.begin() + 9, 0xff);
     Check(openbridge::NikonPairingSessionKey(start, challenge, confirmation) == key, "Stage 4 nonce is not part of session key derivation");
     confirmation[9] ^= 1;
@@ -83,6 +83,19 @@ int main() {
     rejected = false;
     try { openbridge::NikonPairingSessionKey(start, challenge, confirmation); } catch (const std::invalid_argument&) { rejected = true; }
     Check(rejected, "Session key requires a stage 4 confirmation");
+    // Published Blowfish zero-key vector; a repeated ciphertext block also checks CBC chaining, not just the block inverse.
+    const std::array<uint8_t, 8> zero_key{};
+    const std::vector<uint8_t> zero_block_cipher{0x4e, 0xf9, 0x97, 0x45, 0x61, 0x98, 0xdd, 0x78};
+    Check(openbridge::NikonDecryptConnectionField(zero_key, zero_block_cipher) == std::vector<uint8_t>(8), "Connection field zero IV");
+    auto chained = zero_block_cipher;
+    chained.insert(chained.end(), zero_block_cipher.begin(), zero_block_cipher.end());
+    std::vector<uint8_t> chained_plaintext(8);
+    chained_plaintext.insert(chained_plaintext.end(), zero_block_cipher.begin(), zero_block_cipher.end());
+    Check(openbridge::NikonDecryptConnectionField(zero_key, chained) == chained_plaintext, "Connection fields use CBC chaining");
+    rejected = false;
+    try { openbridge::NikonDecryptConnectionField(zero_key, std::array<uint8_t, 7>{}); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    Check(rejected, "Partial encrypted blocks must be rejected");
     std::cout << "PTP codec tests passed\n";
     return 0;
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

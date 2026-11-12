@@ -1,26 +1,31 @@
 package org.openbridge.app.color
 
+import org.openbridge.app.io.writeBytesAtomically
+import org.openbridge.app.io.readBounded
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.provider.OpenableColumns
-import android.util.AtomicFile
 import android.util.Base64
-import java.io.ByteArrayOutputStream
 import java.io.File
-import java.security.MessageDigest
+import org.openbridge.app.util.sha256Hex
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import org.json.JSONException
 import org.openbridge.app.domain.ColorLookSettings
 import org.openbridge.app.domain.ColorPreset
 import org.openbridge.app.domain.LutAsset
+import org.openbridge.app.domain.LutUsage
+import org.openbridge.app.domain.LutImportChoice
 import org.openbridge.app.domain.LutPreviewData
-import org.openbridge.app.domain.builtInColorPresets
+import org.openbridge.app.domain.validateLutName
+
+data class ColorImportResult(val selectableId: String?, val notice: String? = null)
 
 class LutRepository private constructor(context: Context) {
     private val resolver = context.applicationContext.contentResolver
@@ -28,60 +33,66 @@ class LutRepository private constructor(context: Context) {
     private val lock = Any()
     private val handles = linkedMapOf<String, Long>()
 
-    suspend fun luts(): List<LutAsset> = withContext(Dispatchers.IO) {
-        root.listFiles()?.filter { it.name.endsWith(".lut.json") }?.mapNotNull { file ->
-            runCatching {
-                val json = LookCodec.checkedJson(file.readText())
-                LutAsset(json.getString("id"), json.getString("name"), json.getInt("dimension"), json.getInt("size"), json.getString("sourceFormat"))
-            }.getOrNull()
-        }?.sortedBy { it.name } ?: emptyList()
-    }
+    suspend fun luts(includeRemoved: Boolean = false): List<LutAsset> = withContext(Dispatchers.IO) { synchronized(lock) {
+        root.listFiles()?.filter { it.name.endsWith(".lut.json") }?.mapNotNull { readTableMetadata(it) }
+            ?.filter { includeRemoved || !it.removed }?.sortedBy { it.name } ?: emptyList()
+    } }
 
-    suspend fun presets(): List<ColorPreset> = withContext(Dispatchers.IO) {
-        builtInColorPresets + (root.listFiles()?.filter { it.name.endsWith(".preset.json") }?.mapNotNull { file ->
-            runCatching {
-                val json = LookCodec.checkedJson(file.readText())
-                ColorPreset(json.getString("id"), json.getString("name"), LookCodec.decode(json.getJSONObject("look")))
-            }.getOrNull()
-        }?.sortedBy { it.name } ?: emptyList())
-    }
+    private fun readTableMetadata(file: File): LutAsset? = try {
+        val json = LookCodec.checkedJson(file.readText())
+        val implicit = if (json.has("implicitUnitDomain")) json.getBoolean("implicitUnitDomain") else null
+        LutAsset(json.getString("id"), json.getString("name"), json.getInt("dimension"), json.getInt("size"), json.getString("sourceFormat"),
+            LookCodec.decodeUsage(json.getJSONObject("defaultUsage")), implicit, json.optBoolean("removed", false))
+    } catch (_: JSONException) { null } catch (_: IllegalArgumentException) { null }
 
-    suspend fun import(uri: Uri): String = withContext(Dispatchers.IO) {
+    suspend fun presets(): List<ColorPreset> = withContext(Dispatchers.IO) { synchronized(lock) {
+        presetRecords().mapNotNull { (_, json) ->
+            runCatching { ColorPreset(json.getString("id"), json.getString("name"), LookCodec.decode(json.getJSONObject("look"))) }.getOrNull()
+        }.sortedBy { it.name }
+    } }
+
+    private fun presetRecords(): List<Pair<File, JSONObject>> = root.listFiles().orEmpty().filter { it.name.endsWith(".preset.json") }
+        .mapNotNull { file -> runCatching { file to LookCodec.checkedJson(file.readText()) }.getOrNull() }
+
+    suspend fun describeImport(uri: Uri): LutImportChoice = withContext(Dispatchers.IO) {
         var name = "导入的 LUT"
         resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) name = cursor.getString(0).take(160)
+            if (cursor.moveToFirst()) name = cursor.getString(0)?.take(160) ?: name
         }
+        LutImportChoice(uri.toString(), name)
+    }
+
+    suspend fun import(choice: LutImportChoice): ColorImportResult = withContext(Dispatchers.IO) {
+        val uri = Uri.parse(choice.uri)
+        val name = choice.name
+        val coroutine = currentCoroutineContext()
         val bytes = resolver.openInputStream(uri)?.use { stream ->
-            val result = ByteArrayOutputStream()
-            val buffer = ByteArray(64 * 1024)
-            while (true) {
-                currentCoroutineContext().ensureActive()
-                val count = stream.read(buffer)
-                if (count < 0) break
-                require(result.size() + count <= 32 * 1024 * 1024) { "文件超过 32 MiB 导入上限" }
-                result.write(buffer, 0, count)
-            }
-            result.toByteArray()
+            stream.readBounded(32 * 1024 * 1024, "文件超过 32 MiB 导入上限") { coroutine.ensureActive() }
         } ?: error("无法读取 LUT 文件")
         val extension = name.substringAfterLast('.', "").lowercase()
         if (extension == "oblook" || extension == "json") {
             importPreset(bytes, name)
         } else {
             val handle = if (extension == "png") loadHald(bytes) else {
-                require(extension == "cube") { "请选择 .cube、HaldCLUT .png 或 OpenBridge .oblook 预设；ZIP 请先解压" }
+                require(extension == "cube") { "请选择 .cube、HaldCLUT .png 或 .oblook 预设。ZIP 请先解压。" }
                 NativeColor.load(bytes, true)
             }
-            val provenance = JSONObject().apply {
-                put("filename", name); put("license", "unspecified")
-                if (extension == "cube") {
-                    val comments = bytes.toString(Charsets.UTF_8).lineSequence().map { it.trimStart() }
-                        .filter { it.startsWith('#') }.take(64).joinToString("\n").take(8192)
-                    put("comments", comments)
+            try {
+                val provenance = JSONObject().apply {
+                    put("filename", name); put("license", "unspecified")
+                    if (extension == "cube") {
+                        val comments = bytes.toString(Charsets.UTF_8).lineSequence().map { it.trimStart() }
+                            .filter { it.startsWith('#') }.take(64).joinToString("\n").take(8192)
+                        put("comments", comments)
+                    }
                 }
-            }
-            try { saveLut(handle, name.substringBeforeLast('.'), if (extension == "png") "HaldCLUT PNG" else "CUBE", provenance) }
-            finally { NativeColor.release(handle) }
-            name
+                val usage = choice.usage
+                usage.validateForPhoto()
+                val asset = saveLut(handle, name.substringBeforeLast('.'), if (extension == "png") "HaldCLUT PNG" else "CUBE", provenance,
+                    usage)
+                val reason = asset.defaultUsage.unavailableReason
+                ColorImportResult(asset.id.takeIf { reason == null }, reason ?: asset.domainWarning(usage) ?: asset.domainWarning())
+            } finally { NativeColor.release(handle) }
         }
     }
 
@@ -102,74 +113,152 @@ class LutRepository private constructor(context: Context) {
         } finally { bitmap.recycle() }
     }
 
-    private fun saveLut(handle: Long, name: String, sourceFormat: String, provenance: JSONObject? = null): String {
+    /** Stores the table once per content hash. [defaultUsage] only applies to a new table; re-importing keeps the user's choice. */
+    private fun saveLut(handle: Long, name: String, sourceFormat: String, provenance: JSONObject?, defaultUsage: LutUsage,
+        embeddedImplicitDomain: Boolean? = null): LutAsset {
         val binary = NativeColor.pack(handle)
-        val id = digest(binary)
+        val id = binary.sha256Hex()
         val info = NativeColor.values(handle, true)
         synchronized(lock) {
-            write(File(root, "$id.oblut"), binary)
-            val metadata = JSONObject().apply {
-                put("id", id); put("name", name.take(128)); put("dimension", info[0].toInt()); put("size", info[1].toInt())
-                put("sourceFormat", sourceFormat); put("inputColorSpace", "sRGB")
-                put("provenance", cleanProvenance(provenance))
-            }
+            val table = File(root, "$id.oblut")
+            if (!table.exists()) write(table, binary)
             val metadataFile = File(root, "$id.lut.json")
-            if (!metadataFile.exists()) write(metadataFile, metadata.toString().toByteArray())
+            val unitDomain = (2..4).all { info[it] == 0f && info[it + 3] == 1f }
+            val implicit = if (!unitDomain) false else if (sourceFormat == ".oblook") embeddedImplicitDomain else info[8] == 0f
+            if (metadataFile.exists()) {
+                val stored = requireNotNull(readTableMetadata(metadataFile)) { "已有 LUT 元数据无法读取" }
+                if (stored.removed) updateRemoved(id, false)
+                return stored.copy(implicitUnitDomain = implicit ?: stored.implicitUnitDomain, removed = false)
+            }
+            val asset = LutAsset(id, name.take(128), info[0].toInt(), info[1].toInt(), sourceFormat, defaultUsage, implicit)
+            val metadata = JSONObject().apply {
+                put("id", id); put("name", asset.name); put("dimension", asset.dimension); put("size", asset.size)
+                put("sourceFormat", sourceFormat); put("provenance", cleanProvenance(provenance)); put("implicitUnitDomain", implicit)
+                put("defaultUsage", LookCodec.encodeUsage(defaultUsage))
+            }
+            write(metadataFile, metadata.toString().toByteArray())
+            return asset
         }
-        return id
     }
 
-    suspend fun savePreset(name: String, look: ColorLookSettings): Unit = withContext(Dispatchers.IO) {
-        require(name.isNotBlank()) { "预设名称不能为空" }
+    suspend fun setRemoved(id: String, removed: Boolean) = withContext(Dispatchers.IO) { synchronized(lock) { updateRemoved(id, removed) } }
+
+    suspend fun rename(id: String, name: String) = withContext(Dispatchers.IO) { synchronized(lock) {
+        require(id.matches(Regex("[a-f0-9]{64}"))) { "LUT 标识无效" }
+        val title = validateLutName(name)
+        val file = File(root, "$id.lut.json")
+        val record = LookCodec.checkedJson(file.readText()).put("name", title)
+        write(file, record.toString().toByteArray())
+    } }
+
+    private fun updateRemoved(id: String, removed: Boolean) {
+        require(id.matches(Regex("[a-f0-9]{64}"))) { "LUT 标识无效" }
+        val file = File(root, "$id.lut.json")
+        val record = LookCodec.checkedJson(file.readText()).put("removed", removed)
+        write(file, record.toString().toByteArray())
+    }
+
+    /** Only app-owned copies are removed. The confirmation carries the exact set of related presets the user saw. */
+    suspend fun deleteLut(id: String, confirmedPresets: Set<String>) = withContext(Dispatchers.IO) { synchronized(lock) {
+        require(id.matches(Regex("[a-f0-9]{64}"))) { "LUT 标识无效" }
+        val references = presetRecords().filter { (_, record) -> record.optJSONObject("look")?.optString("lutId") == id }
+        require(references.all { it.first.name.removeSuffix(".preset.json") in confirmedPresets }) {
+            "关联预设已变化，请重新确认删除"
+        }
+        val metadata = File(root, "$id.lut.json")
+        val records = (references.map { it.first } + metadata).filter { it.isFile }.map { it to it.readBytes() }
+        val table = File(root, "$id.oblut")
+        try {
+            // Delete the data last so failed record cleanup can restore its small JSON snapshots.
+            for ((file, _) in records) check(file.delete() || !file.exists()) { "无法删除预设记录" }
+            check(!table.exists() || table.delete()) { "无法删除 LUT 副本" }
+        } catch (error: Exception) {
+            for ((file, bytes) in records) if (!file.exists()) {
+                try { write(file, bytes) } catch (restore: Exception) { error.addSuppressed(restore) }
+            }
+            throw error
+        }
+        handles.remove(id)?.let(NativeColor::release)
+        Unit
+    } }
+
+    suspend fun deletePreset(id: String) = withContext(Dispatchers.IO) { synchronized(lock) {
+        require(id.matches(Regex("[a-f0-9-]{36}"))) { "预设标识无效" }
+        val file = File(root, "$id.preset.json")
+        check(!file.exists() || file.delete()) { "无法删除预设" }
+    } }
+
+    suspend fun setDefault(id: String, usage: LutUsage) = withContext(Dispatchers.IO) { synchronized(lock) { updateDefault(id, usage) } }
+
+    private fun updateDefault(id: String, usage: LutUsage) {
+        require(id.matches(Regex("[a-f0-9]{64}"))) { "LUT 标识无效" }
+        usage.validateForPhoto()
+        val file = File(root, "$id.lut.json")
+        write(file, LookCodec.checkedJson(file.readText()).put("defaultUsage", LookCodec.encodeUsage(usage)).toString().toByteArray())
+    }
+
+    suspend fun savePreset(name: String, look: ColorLookSettings): String = withContext(Dispatchers.IO) {
         look.validate()
+        storePreset(name, look)
+    }
+
+    private fun storePreset(name: String, look: ColorLookSettings): String = synchronized(lock) {
+        require(name.isNotBlank()) { "预设名称不能为空" }
         if (look.lutId != null) canonical(look.lutId)
         val id = UUID.randomUUID().toString()
         val record = JSONObject().apply {
             put("id", id); put("name", name.trim().take(80)); put("look", LookCodec.encode(look.copy(name = name.trim().take(80))))
         }
-        synchronized(lock) { write(File(root, "$id.preset.json"), record.toString().toByteArray()) }
+        write(File(root, "$id.preset.json"), record.toString().toByteArray())
+        id
     }
 
     suspend fun exportPreset(preset: ColorPreset, destination: Uri): Unit = withContext(Dispatchers.IO) {
         preset.look.validate()
-        val payload = JSONObject().apply {
-            put("schema", "org.openbridge.look"); put("version", 1); put("pipelineVersion", 1); put("inputColorSpace", "sRGB")
-            put("name", preset.name); put("look", LookCodec.encode(preset.look))
+        val payload = LookCodec.presetEnvelope(preset.name, preset.look).apply {
             if (preset.look.lutId != null) {
                 val bytes = canonical(preset.look.lutId)
                 put("lut", JSONObject().apply {
-                    put("sha256", digest(bytes)); put("encoding", "oblut1-base64"); put("data", Base64.encodeToString(bytes, Base64.NO_WRAP))
+                    put("sha256", bytes.sha256Hex()); put("encoding", "oblut1-base64"); put("data", Base64.encodeToString(bytes, Base64.NO_WRAP))
                     val metadata = LookCodec.checkedJson(File(root, "${preset.look.lutId}.lut.json").readText())
                     put("provenance", cleanProvenance(metadata.optJSONObject("provenance")))
+                    if (metadata.has("implicitUnitDomain")) put("implicitUnitDomain", metadata.getBoolean("implicitUnitDomain"))
                 })
             }
         }.toString(2).toByteArray()
         resolver.openOutputStream(destination, "wt")?.use { it.write(payload) } ?: error("无法保存预设文件")
     }
 
-    private suspend fun importPreset(bytes: ByteArray, fallbackName: String): String {
+    private fun importPreset(bytes: ByteArray, fallbackName: String): ColorImportResult {
         val json = LookCodec.checkedJson(bytes.toString(Charsets.UTF_8))
-        require(json.optString("schema") == "org.openbridge.look" && json.optInt("version") == 1 && json.optInt("pipelineVersion") == 1) {
-            "不是受支持的 OpenBridge 预设，不能把 Lightroom XMP 当作通用预设导入"
+        require(json.optString("schema") == LookCodec.PRESET_SCHEMA && json.optInt("version") == LookCodec.PRESET_VERSION) {
+            "请选择 .oblook 预设，暂不支持 Lightroom XMP。"
         }
-        require(json.optString("inputColorSpace") == "sRGB") { "当前预设仅支持 SDR sRGB" }
         var look = LookCodec.decode(json.getJSONObject("look"))
         val packed = json.optJSONObject("lut")
+        var table: LutAsset? = null
         if (packed != null) {
             require(packed.getString("encoding") == "oblut1-base64") { "预设内 LUT 编码无效" }
             val binary = Base64.decode(packed.getString("data"), Base64.DEFAULT)
-            val hash = digest(binary)
+            val hash = binary.sha256Hex()
             require(hash == packed.getString("sha256")) { "预设中的 LUT 校验失败" }
             require(look.lutId == null || look.lutId == hash) { "预设引用与内嵌 LUT 不一致" }
             val handle = NativeColor.load(binary, false)
-            val id = try {
-                saveLut(handle, json.optString("name", fallbackName), "OpenBridge preset", packed.optJSONObject("provenance"))
+            val saved = try {
+                val implicit = if (packed.has("implicitUnitDomain")) packed.getBoolean("implicitUnitDomain") else null
+                saveLut(handle, json.optString("name", fallbackName), ".oblook", packed.optJSONObject("provenance"), look.usage, implicit)
             } finally { NativeColor.release(handle) }
-            look = look.copy(lutId = id)
-        } else require(look.lutId == null || File(root, "${look.lutId}.oblut").exists()) { "预设引用的 LUT 缺失，请导入完整 .oblook 文件" }
+            table = saved
+            look = look.copy(lutId = saved.id)
+        } else if (look.lutId != null) {
+            require(File(root, "${look.lutId}.oblut").exists()) { "预设引用的 LUT 缺失，请导入完整 .oblook 文件" }
+            val metadata = File(root, "${look.lutId}.lut.json")
+            if (metadata.isFile) table = readTableMetadata(metadata)
+        }
         val name = json.optString("name", fallbackName).take(80)
-        savePreset(name, look)
-        return name
+        val id = storePreset(name, look)
+        val reason = look.usage.unavailableReason
+        return ColorImportResult(id.takeIf { reason == null }, reason ?: table?.domainWarning(look.usage))
     }
 
     fun previewData(id: String): LutPreviewData = synchronized(lock) {
@@ -180,8 +269,10 @@ class LutRepository private constructor(context: Context) {
 
     fun apply(bitmap: Bitmap, look: ColorLookSettings) = synchronized(lock) {
         look.validate()
+        require(!look.usesLog) { "Log 输入需要 RAW 原片" }
         require(bitmap.isMutable && bitmap.config == Bitmap.Config.ARGB_8888) { "调色需要可写的 sRGB RGBA8 位图" }
-        NativeColor.apply(look.lutId?.let(::handle) ?: 0L, bitmap, look.parameters(), bitmap.isPremultiplied)
+        NativeColor.apply(look.lutId?.let(::handle) ?: 0L, bitmap, look.parameters(), bitmap.isPremultiplied,
+            checkNotNull(look.usage.input).nativeCode, checkNotNull(look.usage.output).nativeCode)
     }
 
     private fun handle(id: String): Long {
@@ -195,18 +286,14 @@ class LutRepository private constructor(context: Context) {
         return handle
     }
 
-    private fun canonical(id: String): ByteArray {
+    internal fun canonical(id: String): ByteArray = synchronized(lock) {
         require(id.matches(Regex("[a-f0-9]{64}"))) { "LUT 标识无效" }
         val file = File(root, "$id.oblut")
         require(file.isFile && file.length() <= 16 * 1024 * 1024) { "LUT 文件不存在或过大" }
-        return file.readBytes().also { require(digest(it) == id) { "LUT 文件内容已变化" } }
+        file.readBytes().also { require(it.sha256Hex() == id) { "LUT 文件内容已变化" } }
     }
 
-    private fun write(file: File, bytes: ByteArray) {
-        val atomic = AtomicFile(file)
-        val stream = atomic.startWrite()
-        try { stream.write(bytes); atomic.finishWrite(stream) } catch (error: Exception) { atomic.failWrite(stream); throw error }
-    }
+    private fun write(file: File, bytes: ByteArray) = file.writeBytesAtomically(bytes)
 
     // Attribution supplied by the file author is retained as text; it is not a verified license grant.
     private fun cleanProvenance(source: JSONObject?): JSONObject = JSONObject().apply {
@@ -215,8 +302,6 @@ class LutRepository private constructor(context: Context) {
             source?.optString(key)?.takeIf { it.isNotEmpty() }?.let { put(key, it.take(8192)) }
         }
     }
-
-    private fun digest(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     companion object {
         @Volatile private var instance: LutRepository? = null

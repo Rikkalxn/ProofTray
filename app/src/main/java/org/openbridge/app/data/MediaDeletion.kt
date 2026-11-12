@@ -29,12 +29,12 @@ class MediaDeletion(private val context: Context) {
     suspend fun prepare(assets: List<PhotoAsset>): MediaDeletePlan = withContext(Dispatchers.IO) {
         require(assets.isNotEmpty() && assets.size <= 2000) { "一次请选择 1–2000 个本地文件" }
         val targets = assets.distinctBy { it.id }.map { asset ->
-            require(asset.downloadState == DownloadState.DOWNLOADED) { "相机上的文件不能在此删除，请先下载到手机" }
+            require(asset.downloadState == DownloadState.DOWNLOADED) { "相机上的文件不能在此删除，请先导入到手机" }
             val original = Uri.parse(asset.uri)
             require(original.scheme == "content") { "预览缓存不属于可删除的手机原片" }
             val media = if (original.authority == MediaStore.AUTHORITY) original else {
-                require(original.authority in LOCAL_DOCUMENT_PROVIDERS) { "${asset.name} 不在系统媒体库，可从列表移除或在文件管理器中处理" }
-                MediaStore.getMediaUri(context, original) ?: error("${asset.name} 无法对应到系统媒体库，可选择移除")
+                require(original.authority in LOCAL_DOCUMENT_PROVIDERS) { "${asset.name} 不在系统媒体库，可移出列表或在文件管理器中处理" }
+                MediaStore.getMediaUri(context, original) ?: error("${asset.name} 无法对应到系统媒体库，可选择移出列表")
             }
             val normalized = media.buildUpon().clearQuery().fragment(null).build()
             require(isMediaItemUri(normalized.toString())) { "文件提供方没有返回明确的媒体条目，未发起删除" }
@@ -62,7 +62,7 @@ class MediaDeletion(private val context: Context) {
                 mime.startsWith("image/") -> MediaStore.Images.Media.getContentUri(volume)
                 mime.startsWith("video/") -> MediaStore.Video.Media.getContentUri(volume)
                 mime.startsWith("audio/") -> MediaStore.Audio.Media.getContentUri(volume)
-                else -> error("此文件未被系统识别为媒体，暂不能使用系统删除确认；可从列表移除或用文件管理器处理")
+                else -> error("此文件未被系统识别为媒体，暂不能使用系统删除确认；可移出列表或用文件管理器处理")
             }
             ContentUris.withAppendedId(collection, id)
         } ?: error("无法读取所选文件的媒体记录")
@@ -125,7 +125,7 @@ class MediaDeletion(private val context: Context) {
                 val uri = Uri.parse(target.mediaUri)
                 val removed = context.contentResolver.delete(uri, null, null) > 0
                 if (removed) deleted += target else errors += "${target.name}：系统未确认删除成功"
-            } catch (_: FileNotFoundException) { errors += "${target.name}：文件不可访问，可从列表移除" }
+            } catch (_: FileNotFoundException) { errors += "${target.name}：文件不可访问，可移出列表" }
             catch (_: SecurityException) { errors += "${target.name}：Android 10 未授予删除权限，请使用系统相册或文件管理器" }
             catch (error: Exception) { errors += "${target.name}：${error.message ?: "删除失败"}" }
         }

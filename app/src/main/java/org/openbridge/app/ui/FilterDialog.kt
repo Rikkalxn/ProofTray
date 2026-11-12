@@ -5,10 +5,15 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.DateRangePicker
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.rememberDateRangePickerState
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -26,13 +31,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import org.openbridge.app.domain.DownloadState
+import org.openbridge.app.domain.hasAdvancedConditions
+import org.openbridge.app.domain.pickerDayMillis
+import org.openbridge.app.domain.filterDayMillis
 import org.openbridge.app.domain.FilterSpec
 import org.openbridge.app.domain.MediaFormat
 import org.openbridge.app.domain.OrientationFilter
 import org.openbridge.app.domain.PickState
 import org.openbridge.app.domain.SortOrder
 import java.time.Instant
-import java.time.LocalDate
 import java.time.ZoneId
 import kotlin.math.roundToInt
 
@@ -42,12 +49,15 @@ private const val MEBIBYTE = 1024.0 * 1024.0
 fun FilterDialog(initial: FilterSpec, onApply: (FilterSpec) -> Unit, onDismiss: () -> Unit) {
     var draft by remember(initial) { mutableStateOf(initial) }
     var fields by remember(initial) { mutableStateOf(initial.toFields()) }
+    var advanced by remember(initial) { mutableStateOf(initial.hasAdvancedConditions()) }
     var error by remember { mutableStateOf<String?>(null) }
     fun update(key: String, value: String) { fields = fields + (key to value); error = null }
     BridgeSheet(
         title = "筛选照片", onDismiss = onDismiss,
         actions = {
-            TextButton(onClick = { draft = FilterSpec(); fields = draft.toFields(); error = null }) { Text("重置") }
+            TextButton(onClick = {
+                draft = FilterSpec(sortOrder = initial.sortOrder); fields = draft.toFields(); advanced = false; error = null
+            }) { Text("重置") }
             Spacer(Modifier.weight(1f))
             PrimaryAction("应用筛选", onClick = {
                 runCatching { draft.withFields(fields) }.onSuccess { onApply(it); onDismiss() }
@@ -56,13 +66,6 @@ fun FilterDialog(initial: FilterSpec, onApply: (FilterSpec) -> Unit, onDismiss: 
         },
         content = {
             Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
-                Text("可叠加多个条件，空白表示不限。同一分类的多个选项取并集。",
-                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("内容与选片", style = MaterialTheme.typography.titleMedium)
-                OutlinedTextField(
-                    value = draft.text, onValueChange = { draft = draft.copy(text = it) },
-                    label = { Text("文件名 / 标签关键词") }, modifier = Modifier.fillMaxWidth(), singleLine = true
-                )
                 ChoiceRow("文件格式", MediaFormat.entries, draft.formats, { it.label() }) {
                     draft = draft.copy(formats = draft.formats.toggle(it))
                 }
@@ -77,39 +80,75 @@ fun FilterDialog(initial: FilterSpec, onApply: (FilterSpec) -> Unit, onDismiss: 
                 ChoiceRow("原片状态", DownloadState.entries, draft.downloadStates, { it.label() }) {
                     draft = draft.copy(downloadStates = draft.downloadStates.toggle(it))
                 }
-                RangeInputs("拍摄日期", "date", fields, ::update, "YYYY-MM-DD", "YYYY-MM-DD")
-                RangeInputs("文件大小（MiB）", "size", fields, ::update)
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                Text("拍摄信息", style = MaterialTheme.typography.titleMedium)
                 OutlinedTextField(
-                    value = draft.camera, onValueChange = { draft = draft.copy(camera = it) }, label = { Text("相机型号包含") },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true
+                    value = draft.text, onValueChange = { draft = draft.copy(text = it) },
+                    label = { Text("文件名 / 标签关键词") }, modifier = Modifier.fillMaxWidth(), singleLine = true
                 )
-                OutlinedTextField(
-                    value = draft.lens, onValueChange = { draft = draft.copy(lens = it) }, label = { Text("镜头名称包含") },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true
-                )
-                RangeInputs("ISO", "iso", fields, ::update)
-                RangeInputs("光圈 f/", "aperture", fields, ::update)
-                RangeInputs("曝光时间（秒，可填 1/250）", "exposure", fields, ::update)
-                RangeInputs("焦距（mm）", "focal", fields, ::update)
-                ChoiceRow("画面方向", OrientationFilter.entries, setOf(draft.orientation), { it.label() }) {
-                    draft = draft.copy(orientation = it)
+                ExpandableSection("更多条件", advanced, { advanced = !advanced }) {
+                    CaptureDateRange(draft) { from, until -> draft = draft.copy(capturedAfterMillis = from, capturedBeforeMillis = until) }
+                    RangeInputs("文件大小（MiB）", "size", fields, ::update)
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Text("拍摄信息", style = MaterialTheme.typography.titleMedium)
+                    OutlinedTextField(
+                        value = draft.camera, onValueChange = { draft = draft.copy(camera = it) }, label = { Text("相机型号包含") },
+                        modifier = Modifier.fillMaxWidth(), singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = draft.lens, onValueChange = { draft = draft.copy(lens = it) }, label = { Text("镜头名称包含") },
+                        modifier = Modifier.fillMaxWidth(), singleLine = true
+                    )
+                    RangeInputs("ISO", "iso", fields, ::update)
+                    RangeInputs("光圈 f/", "aperture", fields, ::update)
+                    RangeInputs("曝光时间（秒，可填 1/250）", "exposure", fields, ::update)
+                    RangeInputs("焦距（mm）", "focal", fields, ::update)
+                    ChoiceRow("画面方向", OrientationFilter.entries, setOf(draft.orientation), { it.label() }) {
+                        draft = draft.copy(orientation = it)
+                    }
+                    OutlinedTextField(
+                        value = fields["tags"].orEmpty(), onValueChange = { update("tags", it) },
+                        label = { Text("同时包含标签（逗号分隔）") }, modifier = Modifier.fillMaxWidth(), singleLine = true
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Text("显示方式", style = MaterialTheme.typography.titleMedium)
+                    CheckRow("仅有 RAW + JPEG 配对的照片", draft.pairedRawJpegOnly) { draft = draft.copy(pairedRawJpegOnly = it) }
+                    CheckRow("保留元数据未知的照片", draft.includeUnknownMetadata) { draft = draft.copy(includeUnknownMetadata = it) }
                 }
-                OutlinedTextField(
-                    value = fields["tags"].orEmpty(), onValueChange = { update("tags", it) },
-                    label = { Text("同时包含标签（逗号分隔）") }, modifier = Modifier.fillMaxWidth(), singleLine = true
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                Text("显示方式", style = MaterialTheme.typography.titleMedium)
-                CheckRow("仅有 RAW + JPEG 配对的照片", draft.pairedRawJpegOnly) { draft = draft.copy(pairedRawJpegOnly = it) }
-                CheckRow("保留元数据未知的照片", draft.includeUnknownMetadata) { draft = draft.copy(includeUnknownMetadata = it) }
-                Text("未知 EXIF 不等于不匹配；保留时会计入待确认数量。", style = MaterialTheme.typography.bodySmall)
-                ChoiceRow("排序", SortOrder.entries, setOf(draft.sortOrder), { it.label() }) { draft = draft.copy(sortOrder = it) }
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         }
     )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CaptureDateRange(filter: FilterSpec, onChange: (Long?, Long?) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val hasDate = filter.capturedAfterMillis != null || filter.capturedBeforeMillis != null
+    Column {
+        Text("拍摄日期", style = MaterialTheme.typography.labelLarge)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { open = true }, modifier = Modifier.weight(1f)) {
+                Text(if (!hasDate) "选择日期范围" else filter.capturedAfterMillis.toDate().ifEmpty { "不限" } + " — " +
+                    filter.capturedBeforeMillis.toDate().ifEmpty { "不限" })
+            }
+            if (hasDate) TextButton(onClick = { onChange(null, null) }) { Text("清除") }
+        }
+    }
+    if (open) {
+        val zone = remember { ZoneId.systemDefault() }
+        val first = pickerDayMillis(filter.capturedAfterMillis, zone)
+        val last = pickerDayMillis(filter.capturedBeforeMillis, zone)
+        val picker = rememberDateRangePickerState(initialSelectedStartDateMillis = first,
+            initialSelectedEndDateMillis = last.takeIf { first != null }, initialDisplayedMonthMillis = first ?: last)
+        DatePickerDialog(onDismissRequest = { open = false }, confirmButton = {
+            TextButton(enabled = picker.selectedStartDateMillis != null && picker.selectedEndDateMillis != null, onClick = {
+                onChange(filterDayMillis(picker.selectedStartDateMillis, false, zone), filterDayMillis(picker.selectedEndDateMillis, true, zone))
+                open = false
+            }) { Text("确定") }
+        }, dismissButton = { TextButton(onClick = { open = false }) { Text("取消") } }) {
+            DateRangePicker(picker, Modifier.heightIn(max = 520.dp), title = { Text("拍摄日期", Modifier.padding(24.dp)) })
+        }
+    }
 }
 
 @Composable
@@ -153,7 +192,6 @@ private fun RangeInputs(
 }
 
 private fun FilterSpec.toFields(): Map<String, String> = mapOf(
-    "dateMin" to capturedAfterMillis.toDate(), "dateMax" to capturedBeforeMillis.toDate(),
     "sizeMin" to (minimumSizeBytes?.div(MEBIBYTE)?.toString() ?: ""),
     "sizeMax" to (maximumSizeBytes?.div(MEBIBYTE)?.toString() ?: ""),
     "isoMin" to (minimumIso?.toString() ?: ""), "isoMax" to (maximumIso?.toString() ?: ""),
@@ -190,15 +228,7 @@ private fun FilterSpec.withFields(fields: Map<String, String>): FilterSpec {
         require(value < Long.MAX_VALUE / MEBIBYTE) { "文件大小超出范围" }
         return (value * MEBIBYTE).toLong()
     }
-    fun date(key: String, endOfDay: Boolean): Long? {
-        val text = fields[key].orEmpty().trim()
-        if (text.isEmpty()) return null
-        val value = runCatching { LocalDate.parse(text) }.getOrElse { throw IllegalArgumentException("日期请填写 YYYY-MM-DD") }
-        val start = if (endOfDay) value.plusDays(1) else value
-        return start.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli() - if (endOfDay) 1 else 0
-    }
     val result = copy(
-        capturedAfterMillis = date("dateMin", false), capturedBeforeMillis = date("dateMax", true),
         minimumSizeBytes = bytes("sizeMin"), maximumSizeBytes = bytes("sizeMax"),
         minimumIso = iso("isoMin"), maximumIso = iso("isoMax"),
         minimumAperture = number("apertureMin", "光圈"), maximumAperture = number("apertureMax", "光圈"),
@@ -239,7 +269,7 @@ internal fun PickState.label(): String = when (this) {
 
 internal fun DownloadState.label(): String = when (this) {
     DownloadState.REMOTE -> "相机原片"
-    DownloadState.QUEUED -> "待下载"
+    DownloadState.QUEUED -> "待导入"
     DownloadState.DOWNLOADED -> "本地原片"
 }
 

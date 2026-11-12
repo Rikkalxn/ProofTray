@@ -1,6 +1,8 @@
 #include <android/bitmap.h>
 #include <jni.h>
 
+#include "jni_support.h"
+
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -14,11 +16,7 @@ std::mutex registry_mutex;
 std::unordered_map<jlong, std::shared_ptr<const openbridge::ColorLut>> registry;
 std::atomic<jlong> next_id{1};
 
-void Fail(JNIEnv* env, const char* message) {
-  if (env->ExceptionCheck()) return;
-  const auto type = env->FindClass("java/lang/IllegalArgumentException");
-  if (type) { env->ThrowNew(type, message); env->DeleteLocalRef(type); }
-}
+using openbridge::jni::ThrowArgument;
 
 std::shared_ptr<const openbridge::ColorLut> Get(jlong id) {
   if (id == 0) return {};
@@ -53,10 +51,7 @@ class BitmapPixels {
 };
 
 std::vector<uint8_t> Bytes(JNIEnv* env, jbyteArray data) {
-  if (!data || env->GetArrayLength(data) > 32 * 1024 * 1024) throw std::invalid_argument("LUT file exceeds the size limit");
-  std::vector<uint8_t> bytes(env->GetArrayLength(data));
-  if (!bytes.empty()) env->GetByteArrayRegion(data, 0, static_cast<jsize>(bytes.size()), reinterpret_cast<jbyte*>(bytes.data()));
-  return bytes;
+  return openbridge::jni::ReadBytes(env, data, 32 * 1024 * 1024, "LUT file exceeds the size limit");
 }
 }  // namespace
 
@@ -65,7 +60,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_org_openbridge_app_color_NativeColor_loa
     const auto bytes = Bytes(env, data);
     return Save(cube ? openbridge::ParseCube(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()))
                      : openbridge::ParseLutBinary(bytes));
-  } catch (const std::exception& error) { Fail(env, error.what()); return 0; }
+  } catch (const std::exception& error) { ThrowArgument(env, error.what()); return 0; }
 }
 
 extern "C" JNIEXPORT jlong JNICALL Java_org_openbridge_app_color_NativeColor_hald(JNIEnv* env, jobject, jobject bitmap) {
@@ -73,7 +68,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_org_openbridge_app_color_NativeColor_hal
     BitmapPixels pixels(env, bitmap);
     if (pixels.info.width != pixels.info.height) throw std::invalid_argument("Hald LUT must be a square image");
     return Save(openbridge::FromHaldRgba(pixels.bytes(), pixels.info.width, pixels.info.stride));
-  } catch (const std::exception& error) { Fail(env, error.what()); return 0; }
+  } catch (const std::exception& error) { ThrowArgument(env, error.what()); return 0; }
 }
 
 extern "C" JNIEXPORT jfloatArray JNICALL Java_org_openbridge_app_color_NativeColor_values(JNIEnv* env, jobject, jlong id, jboolean metadata) {
@@ -85,11 +80,12 @@ extern "C" JNIEXPORT jfloatArray JNICALL Java_org_openbridge_app_color_NativeCol
       result = {static_cast<float>(lut->dimension), static_cast<float>(lut->size)};
       result.insert(result.end(), lut->domain_min.begin(), lut->domain_min.end());
       result.insert(result.end(), lut->domain_max.begin(), lut->domain_max.end());
+      result.push_back(lut->domain_declared ? 1.f : 0.f);
     } else result = lut->values;
     auto output = env->NewFloatArray(static_cast<jsize>(result.size()));
     if (output) env->SetFloatArrayRegion(output, 0, static_cast<jsize>(result.size()), result.data());
     return output;
-  } catch (const std::exception& error) { Fail(env, error.what()); return nullptr; }
+  } catch (const std::exception& error) { ThrowArgument(env, error.what()); return nullptr; }
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL Java_org_openbridge_app_color_NativeColor_pack(JNIEnv* env, jobject, jlong id) {
@@ -97,10 +93,8 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_org_openbridge_app_color_NativeColo
     const auto lut = Get(id);
     if (!lut) throw std::invalid_argument("No LUT selected");
     const auto bytes = openbridge::SerializeLut(*lut);
-    auto output = env->NewByteArray(static_cast<jsize>(bytes.size()));
-    if (output) env->SetByteArrayRegion(output, 0, static_cast<jsize>(bytes.size()), reinterpret_cast<const jbyte*>(bytes.data()));
-    return output;
-  } catch (const std::exception& error) { Fail(env, error.what()); return nullptr; }
+    return openbridge::jni::ByteArray(env, bytes);
+  } catch (const std::exception& error) { ThrowArgument(env, error.what()); return nullptr; }
 }
 
 extern "C" JNIEXPORT void JNICALL Java_org_openbridge_app_color_NativeColor_release(JNIEnv*, jobject, jlong id) {
@@ -109,14 +103,16 @@ extern "C" JNIEXPORT void JNICALL Java_org_openbridge_app_color_NativeColor_rele
 }
 
 extern "C" JNIEXPORT void JNICALL Java_org_openbridge_app_color_NativeColor_apply(
-    JNIEnv* env, jobject, jlong id, jobject bitmap, jfloatArray settings, jboolean premultiplied) {
+    JNIEnv* env, jobject, jlong id, jobject bitmap, jfloatArray settings, jboolean premultiplied, jint input, jint output) {
   try {
     if (!settings || env->GetArrayLength(settings) != 5) throw std::invalid_argument("Invalid look parameters");
     std::array<float, 5> values{};
     env->GetFloatArrayRegion(settings, 0, 5, values.data());
     openbridge::ColorLook look{values[0], values[1], values[2], values[3], values[4]};
+    look.input_encoding = static_cast<openbridge::LutEncoding>(input);
+    look.output_encoding = static_cast<openbridge::LutEncoding>(output);
     const auto lut = Get(id);
     BitmapPixels pixels(env, bitmap);
     openbridge::ApplyColorLookRgba(pixels.bytes(), pixels.info.width, pixels.info.height, pixels.info.stride, premultiplied, look, lut.get());
-  } catch (const std::exception& error) { Fail(env, error.what()); }
+  } catch (const std::exception& error) { ThrowArgument(env, error.what()); }
 }

@@ -37,7 +37,9 @@ data class PhotoAsset(
     val jpegCopyImportedAtMillis: Long? = null,
     val derivedFromId: String? = null,
     val cameraCaptureKey: String? = null,
-    val previewRevision: String? = null
+    val previewRevision: String? = null,
+    val stackId: String? = null,
+    val sourceOrientation: Int? = null
 )
 
 data class FilterSpec(
@@ -73,11 +75,12 @@ data class CatalogResult(val groups: List<PhotoGroup>, val matchedCount: Int, va
 data class SavedFilter(val id: String, val name: String, val spec: FilterSpec)
 
 enum class ExportFormat { ORIGINAL, JPEG, PNG }
+enum class ExportDestination { GALLERY, DIRECTORY }
 enum class ExportStatus { QUEUED, RUNNING, COMPLETED, FAILED, CANCELLED }
 
 data class ExportOptions(
-    val format: ExportFormat = ExportFormat.ORIGINAL, val jpegQuality: Int = 95, val maxEdge: Int = 0,
-    val look: ColorLookSettings? = null
+    val format: ExportFormat = ExportFormat.JPEG, val jpegQuality: Int = 95, val maxEdge: Int = 4096,
+    val look: ColorLookSettings? = null, val destination: ExportDestination = ExportDestination.GALLERY, val frame: FrameSnapshot? = null
 )
 data class ExportTask(
     val id: String,
@@ -88,4 +91,9 @@ data class ExportTask(
     val progress: Float = 0f,
     val outputUri: String? = null,
     val message: String? = null
-)
+) {
+    fun requiresLut(id: String): Boolean = options.look?.lutId == id && status in setOf(ExportStatus.QUEUED, ExportStatus.RUNNING)
+
+    val canClearHistory: Boolean get() = status == ExportStatus.COMPLETED ||
+        (status in setOf(ExportStatus.FAILED, ExportStatus.CANCELLED) && outputUri == null)
+}

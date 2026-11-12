@@ -16,10 +16,13 @@ android {
         applicationId = "org.openbridge.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 17
-        versionName = "0.6.10"
+        versionCode = 36
+        versionName = "0.9.7"
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+        externalNativeBuild {
+            cmake { arguments += "-DANDROID_STL=c++_shared" }
         }
     }
 
@@ -63,6 +66,10 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
     implementation("androidx.exifinterface:exifinterface:1.4.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("no.nordicsemi.android:ble-ktx:2.11.0")
+    implementation("com.github.mwiede:jsch:2.28.8")
+    implementation("com.squareup.okio:okio:3.16.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

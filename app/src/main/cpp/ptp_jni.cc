@@ -1,5 +1,7 @@
 #include <jni.h>
 
+#include "jni_support.h"
+
 #include <limits>
 #include <cmath>
 #include <stdexcept>
@@ -11,25 +13,11 @@
 
 namespace {
 
+using openbridge::jni::ByteArray;
+using openbridge::jni::ThrowArgument;
+
 std::vector<uint8_t> Bytes(JNIEnv* env, jbyteArray array) {
-  if (!array || env->GetArrayLength(array) > 16 * 1024 * 1024) throw std::invalid_argument("Invalid PTP metadata payload");
-  std::vector<uint8_t> result(env->GetArrayLength(array));
-  if (!result.empty()) env->GetByteArrayRegion(array, 0, static_cast<jsize>(result.size()), reinterpret_cast<jbyte*>(result.data()));
-  return result;
-}
-
-jbyteArray ByteArray(JNIEnv* env, const std::vector<uint8_t>& bytes) {
-  auto result = env->NewByteArray(static_cast<jsize>(bytes.size()));
-  if (result && !bytes.empty()) {
-    env->SetByteArrayRegion(result, 0, static_cast<jsize>(bytes.size()), reinterpret_cast<const jbyte*>(bytes.data()));
-  }
-  return result;
-}
-
-void Failure(JNIEnv* env, const char* message) {
-  if (env->ExceptionCheck()) return;
-  auto type = env->FindClass("java/lang/IllegalArgumentException");
-  if (type) { env->ThrowNew(type, message); env->DeleteLocalRef(type); }
+  return openbridge::jni::ReadBytes(env, array, 16 * 1024 * 1024, "Invalid PTP metadata payload");
 }
 
 }  // namespace
@@ -37,13 +25,19 @@ void Failure(JNIEnv* env, const char* message) {
 extern "C" JNIEXPORT jbyteArray JNICALL Java_org_openbridge_app_camera_NativePtp_pairReply(
     JNIEnv* env, jobject, jbyteArray start, jbyteArray challenge) {
   try { return ByteArray(env, openbridge::NikonPairingReply(Bytes(env, start), Bytes(env, challenge))); }
-  catch (const std::exception& error) { Failure(env, error.what()); return nullptr; }
+  catch (const std::exception& error) { ThrowArgument(env, error.what()); return nullptr; }
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL Java_org_openbridge_app_camera_NativePtp_pairingKey(
     JNIEnv* env, jobject, jbyteArray start, jbyteArray challenge, jbyteArray confirmation) {
   try { return ByteArray(env, openbridge::NikonPairingSessionKey(Bytes(env, start), Bytes(env, challenge), Bytes(env, confirmation))); }
-  catch (const std::exception& error) { Failure(env, error.what()); return nullptr; }
+  catch (const std::exception& error) { ThrowArgument(env, error.what()); return nullptr; }
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL Java_org_openbridge_app_camera_NativePtp_decryptConnectionField(
+    JNIEnv* env, jobject, jbyteArray key, jbyteArray ciphertext) {
+  try { return ByteArray(env, openbridge::NikonDecryptConnectionField(Bytes(env, key), Bytes(env, ciphertext))); }
+  catch (const std::exception& error) { ThrowArgument(env, error.what()); return nullptr; }
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL Java_org_openbridge_app_camera_NativePtp_initialize(JNIEnv* env, jobject, jbyteArray guid, jstring name) {
@@ -52,7 +46,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_org_openbridge_app_camera_NativePtp
     std::u16string text(env->GetStringLength(name), 0);
     env->GetStringRegion(name, 0, static_cast<jsize>(text.size()), reinterpret_cast<jchar*>(text.data()));
     return ByteArray(env, openbridge::ptp::Initialize(Bytes(env, guid), text));
-  } catch (const std::exception& error) { Failure(env, error.what()); return nullptr; }
+  } catch (const std::exception& error) { ThrowArgument(env, error.what()); return nullptr; }
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL Java_org_openbridge_app_camera_NativePtp_command(
@@ -70,7 +64,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_org_openbridge_app_camera_NativePtp
     const auto bytes = openbridge::ptp::Command(static_cast<uint16_t>(operation), static_cast<uint32_t>(transaction),
                                                params, receive_data, send_data);
     return ByteArray(env, bytes);
-  } catch (const std::exception& error) { Failure(env, error.what()); return nullptr; }
+  } catch (const std::exception& error) { ThrowArgument(env, error.what()); return nullptr; }
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL Java_org_openbridge_app_camera_NativePtp_location(
@@ -80,13 +74,13 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_org_openbridge_app_camera_NativePtp
     openbridge::LocationFix fix{latitude, longitude, std::nullopt, utc_millis, satellites};
     if (!std::isnan(altitude)) fix.altitude_metres = altitude;
     return ByteArray(env, openbridge::NikonLocationPacket(fix));
-  } catch (const std::exception& error) { Failure(env, error.what()); return nullptr; }
+  } catch (const std::exception& error) { ThrowArgument(env, error.what()); return nullptr; }
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL Java_org_openbridge_app_camera_NativePtp_currentTime(
     JNIEnv* env, jobject, jlong utc_millis, jint standard_offset_minutes, jint daylight_minutes) {
   try { return ByteArray(env, openbridge::NikonCurrentTimePacket(utc_millis, standard_offset_minutes, daylight_minutes)); }
-  catch (const std::exception& error) { Failure(env, error.what()); return nullptr; }
+  catch (const std::exception& error) { ThrowArgument(env, error.what()); return nullptr; }
 }
 
 extern "C" JNIEXPORT jstring JNICALL Java_org_openbridge_app_camera_NativePtp_info(JNIEnv* env, jobject, jbyteArray data, jboolean device) {
@@ -94,7 +88,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_org_openbridge_app_camera_NativePtp_in
     auto bytes = Bytes(env, data);
     const auto json = device ? openbridge::ptp::DeviceInfoJson(bytes) : openbridge::ptp::ObjectInfoJson(bytes);
     return env->NewStringUTF(json.c_str());
-  } catch (const std::exception& error) { Failure(env, error.what()); return nullptr; }
+  } catch (const std::exception& error) { ThrowArgument(env, error.what()); return nullptr; }
 }
 
 extern "C" JNIEXPORT jlongArray JNICALL Java_org_openbridge_app_camera_NativePtp_handles(JNIEnv* env, jobject, jbyteArray data) {
@@ -104,5 +98,5 @@ extern "C" JNIEXPORT jlongArray JNICALL Java_org_openbridge_app_camera_NativePtp
     auto result = env->NewLongArray(static_cast<jsize>(longs.size()));
     if (result && !longs.empty()) env->SetLongArrayRegion(result, 0, static_cast<jsize>(longs.size()), longs.data());
     return result;
-  } catch (const std::exception& error) { Failure(env, error.what()); return nullptr; }
+  } catch (const std::exception& error) { ThrowArgument(env, error.what()); return nullptr; }
 }

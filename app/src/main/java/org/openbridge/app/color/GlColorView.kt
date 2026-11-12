@@ -28,8 +28,17 @@ class GlColorView(context: Context, onError: (String) -> Unit) : GLSurfaceView(c
     }
 
     fun update(bitmap: Bitmap, lut: LutPreviewData?, look: ColorLookSettings) {
+        look.usage.validateForPhoto()
+        require(!look.usesLog) { "Log 输入需要 RAW 原片" }
         pending.set(Frame(bitmap, lut, look))
         requestRender()
+    }
+
+    /** Stop the GL worker before its source bitmap lease is released by the editor. */
+    fun releasePreview() {
+        onPause()
+        pending.set(null)
+        renderer.clearImageReference()
     }
 
     private inner class ColorRenderer(private val error: (String) -> Unit) : Renderer {
@@ -38,6 +47,7 @@ class GlColorView(context: Context, onError: (String) -> Unit) : GLSurfaceView(c
         private var width = 1
         private var height = 1
         private var image: Bitmap? = null
+        fun clearImageReference() { image = null }
         private var lutId: String? = null
         private val textures = IntArray(2)
         private val vertexArray = IntArray(1)
@@ -112,6 +122,8 @@ class GlColorView(context: Context, onError: (String) -> Unit) : GLSurfaceView(c
                 GLES30.glUniform3fv(location("domainMin"), 1, lut?.domainMin ?: floatArrayOf(0f, 0f, 0f), 0)
                 GLES30.glUniform3fv(location("domainMax"), 1, lut?.domainMax ?: floatArrayOf(1f, 1f, 1f), 0)
                 GLES30.glUniform1f(location("strength"), frame.look.strength)
+                GLES30.glUniform1i(location("inputEncoding"), checkNotNull(frame.look.usage.input).nativeCode)
+                GLES30.glUniform1i(location("outputEncoding"), checkNotNull(frame.look.usage.output).nativeCode)
                 GLES30.glUniform1f(location("exposure"), frame.look.exposure)
                 GLES30.glUniform1f(location("contrast"), frame.look.contrast)
                 GLES30.glUniform1f(location("saturation"), frame.look.saturation)
@@ -167,7 +179,7 @@ class GlColorView(context: Context, onError: (String) -> Unit) : GLSurfaceView(c
             in vec2 uv;
             uniform sampler2D imageTexture;
             uniform sampler3D lutTexture;
-            uniform int hasLut, lutSize, premultiplied;
+            uniform int hasLut, lutSize, premultiplied, inputEncoding, outputEncoding;
             uniform vec3 domainMin, domainMax;
             uniform float strength, exposure, contrast, saturation, warmth;
             out vec4 result;
@@ -207,7 +219,11 @@ class GlColorView(context: Context, onError: (String) -> Unit) : GLSurfaceView(c
                 color = 0.5 + (color-0.5) * (1.0+contrast);
                 float luma = dot(color, vec3(0.2126,0.7152,0.0722));
                 color = clamp(vec3(luma) + (color-vec3(luma))*saturation, 0.0, 1.0);
-                if (hasLut == 1) color = lookup(color);
+                if (hasLut == 1) {
+                    if (inputEncoding == 2) color = pow(linearRgb(color), vec3(1.0/2.4));
+                    color = lookup(color);
+                    if (outputEncoding == 2) color = encodedRgb(pow(max(color, vec3(0.0)), vec3(2.4)));
+                }
                 color = clamp(mix(original, color, strength), 0.0, 1.0);
                 result = vec4(color * source.a + vec3(0.12) * (1.0-source.a), 1.0);
             }

@@ -44,7 +44,7 @@ struct PhotoAsset {
   std::vector<std::string> tags;
   std::string source_id;
   std::string folder;
-  std::string burst_id;
+  std::string stack_id;
   bool metadata_complete = false;
 };
 
@@ -86,7 +86,7 @@ struct CatalogResult {
 // AND between fields, OR within masks, ALL required tags. Bounds are inclusive.
 // Unknown selected EXIF fields produce pending, unless another field excludes.
 // Throws std::invalid_argument for invalid ranges, enum values or duplicate IDs.
-CatalogResult QueryCatalog(const std::vector<PhotoAsset>& assets, const CatalogFilter& filter, bool collapse_bursts = true);
+CatalogResult QueryCatalog(const std::vector<PhotoAsset>& assets, const CatalogFilter& filter, bool collapse_stacks = true);
 
 }  // namespace openbridge
 

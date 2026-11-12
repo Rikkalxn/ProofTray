@@ -1,14 +1,15 @@
 cmake_minimum_required(VERSION 3.22)
-project(OpenBridgeCore LANGUAGES CXX)
+project(ProofTrayCore LANGUAGES CXX)
 
-add_library(openbridge_core STATIC src/catalog.cc src/ptp.cc src/nikon_pairing.cc src/nikon_location.cc src/color_lut.cc
+add_library(openbridge_core STATIC src/catalog.cc src/ptp.cc src/nikon_pairing.cc src/nikon_location.cc src/color_lut.cc src/log_encoding.cc
+    src/raw_rendering.cc
     ../third_party/furble/Blowfish.cpp)
 target_include_directories(openbridge_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(openbridge_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/furble")
 target_compile_features(openbridge_core PUBLIC cxx_std_20)
 set_target_properties(openbridge_core PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_EXTENSIONS OFF)
 if(ANDROID)
-    set_source_files_properties(src/color_lut.cc PROPERTIES COMPILE_OPTIONS "-O2")
+    set_source_files_properties(src/color_lut.cc src/log_encoding.cc src/raw_rendering.cc PROPERTIES COMPILE_OPTIONS "-O2")
 endif()
 
 option(OPENBRIDGE_BUILD_TESTS "Build portable catalog tests" ON)
@@ -23,6 +24,9 @@ if(OPENBRIDGE_BUILD_TESTS AND NOT ANDROID)
     add_executable(openbridge_color_tests tests/color_lut_test.cc)
     target_link_libraries(openbridge_color_tests PRIVATE openbridge_core)
     add_test(NAME color_lut COMMAND openbridge_color_tests)
+    add_executable(openbridge_raw_rendering_tests tests/raw_rendering_test.cc)
+    target_link_libraries(openbridge_raw_rendering_tests PRIVATE openbridge_core)
+    add_test(NAME raw_rendering COMMAND openbridge_raw_rendering_tests)
     add_executable(openbridge_location_tests tests/nikon_location_test.cc)
     target_link_libraries(openbridge_location_tests PRIVATE openbridge_core)
     add_test(NAME nikon_location COMMAND openbridge_location_tests)

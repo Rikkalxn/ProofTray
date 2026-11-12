@@ -1,6 +1,5 @@
 package org.openbridge.app.camera
 
-import android.graphics.BitmapFactory
 import android.net.Network
 import android.util.Log
 import java.io.ByteArrayOutputStream
@@ -9,29 +8,28 @@ import java.io.DataInputStream
 import java.io.EOFException
 import java.io.IOException
 import java.io.OutputStream
-import java.net.InetSocketAddress
-import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
 import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONObject
+import org.openbridge.app.data.PreviewImageInfo
+import org.openbridge.app.domain.MediaFormat
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withTimeoutOrNull
 
-internal class PtpResponseException(val operation: Int, val response: Int, val receivedBytes: Long = 0) : IOException(
-    "PTP 操作 0x${operation.toString(16)} 返回 0x${response.toString(16)}"
-)
-
 /** Android-bound sockets; wire request construction and datasets are handled by the C++ codec. */
 internal class PtpLink(
-    private val network: Network?, private val host: String, private val port: Int, private val onDisconnected: (Throwable) -> Unit = {}
+    network: Network?, private val host: String, private val port: Int, private val onDisconnected: (Throwable) -> Unit = {},
+    sonyAccess: SonyAccess? = null, private val expectedMake: CameraMake = CameraMake.OTHER, private val diagnostic: (String) -> Unit = {}
 ) : Closeable {
     private val lock = Any()
     private val closed = AtomicBoolean(false)
-    @Volatile private var commandSocket: Socket? = null
-    @Volatile private var eventSocket: Socket? = null
+    private val transport = PtpTransport(network, host, port, sonyAccess)
+    @Volatile var make = CameraMake.OTHER
+        private set
     @Volatile var connected = false
         private set
     private var transaction = 0L
@@ -40,6 +38,12 @@ internal class PtpLink(
     lateinit var device: JSONObject
         private set
     @Volatile private var operations = emptySet<Int>()
+    private var sonyContents: SonyContentsCatalog? = null
+    private var sonyMtpTransfer = false
+    private var sonyProperties = emptySet<Int>()
+    private var sonyReportSize = false
+    private var sonyOriginal: SonyMediaFile? = null
+    private var sonyReadStamp: Long? = null
     private val rejectedPreviewOperations = mutableSetOf<Int>()
     private val catalogSignals = Channel<Unit>(Channel.CONFLATED)
     @Volatile var catalogRevision: Int = 0
@@ -48,53 +52,159 @@ internal class PtpLink(
     fun connect(identity: UUID) = synchronized(lock) {
         require(port in 1..65535 && host.isNotBlank()) { "相机地址或端口无效" }
         try {
-            val socket = openSocket().also { commandSocket = it }
-            input = DataInputStream(socket.getInputStream())
-            output = socket.getOutputStream()
+            val command = transport.open()
+            input = command.input
+            output = command.output
             val guid = ByteBuffer.allocate(16).putLong(identity.mostSignificantBits).putLong(identity.leastSignificantBits).array()
-            output.write(NativePtp.initialize(guid, "OpenBridge"))
+            output.write(NativePtp.initialize(guid, "ProofTray"))
             output.flush()
             val (type, body) = frame(input, 1024 * 1024)
-            if (type == 5) throw IOException("PTP/IP 握手被拒，原因码 ${body.uint(0)}；请检查相机连接模式和机身确认提示")
+            if (type == 5) {
+                diagnostic("PTP/IP InitFail 0x${body.uint(0).toString(16)}")
+                throw IOException("机身拒绝了连接，请检查相机的连接模式和确认提示")
+            }
             check(type == 2 && body.size >= 24) { "PTP/IP 初始化响应无效" }
             val connection = body.uint(0)
-            val events = openSocket().also { eventSocket = it }
-            val eventInput = DataInputStream(events.getInputStream())
-            events.getOutputStream().write(packet(3, uintBytes(connection)))
+            val events = transport.open()
+            val eventInput = events.input
+            events.output.write(packet(3, uintBytes(connection)))
+            events.output.flush()
             val (eventType, _) = frame(eventInput, 1024 * 1024)
             check(eventType == 4) { "PTP/IP 事件通道未被相机接受" }
-            transact(0x1002, longArrayOf(SecureRandom().nextInt(Int.MAX_VALUE).toLong() + 1), false, null, 0)
-            transaction = 1
-            device = JSONObject(NativePtp.info(data(0x1001), true))
-            operations = device.getJSONArray("operations").let { values -> (0 until values.length()).map { values.getInt(it) }.toSet() }
+            if (expectedMake != CameraMake.NIKON) {
+                try { readDevice() } catch (error: PtpResponseException) {
+                    if (expectedMake != CameraMake.OTHER || error.response != 0x2003) throw error
+                }
+            }
+            if (expectedMake == CameraMake.SONY) check(make == expectedMake) { "Wi-Fi 设备与已配对的索尼相机不符" }
+            if (make == CameraMake.SONY) {
+                openSonyImport()
+            } else {
+                transact(0x1002, longArrayOf(SecureRandom().nextInt(Int.MAX_VALUE).toLong() + 1), false, null, 0)
+                transaction = 1
+                readDevice()
+                check(make != CameraMake.SONY) { "请从相机页选择这台索尼机身，重新开启智能手机传输会话" }
+            }
             rejectedPreviewOperations.clear()
             connected = true
-            events.soTimeout = 0
+            events.listenForEvents()
             Thread({
                 try {
                     while (connected) {
                         val (kind, payload) = frame(eventInput, 1024 * 1024)
-                        if (kind == 13) events.getOutputStream().write(packet(14))
+                        if (kind == 13) { events.output.write(packet(14)); events.output.flush() }
                         if (kind == 8 && payload.size >= 6) {
                             val code = (payload[0].toInt() and 255) or ((payload[1].toInt() and 255) shl 8)
                             if (code in setOf(0x4004, 0x4005, 0x400b)) catalogRevision++
                             if (code in setOf(0x4002, 0x4003, 0x4004, 0x4005, 0x400b, 0x400d, 0xc101, 0xc102)) catalogSignals.trySend(Unit)
+                            if (make == CameraMake.SONY && code in setOf(0xc201, 0xc202, 0xc20d)) catalogSignals.trySend(Unit)
                         }
                     }
                 } catch (error: Exception) {
                     if (connected) Log.w("OpenBridgeCamera", "PTP event channel ended", error)
                     closeWithCause(error)
                 }
-            }, "OpenBridge-PTP-events").apply { isDaemon = true; start() }
+            }, "ProofTray-PTP-events").apply { isDaemon = true; start() }
         } catch (error: Exception) {
             close()
             throw IOException("连接相机失败：${error.message}", error)
         }
     }
 
-    fun storageIds(): LongArray = synchronized(lock) { NativePtp.handles(data(0x1004)) }
-    fun objectHandles(storage: Long): LongArray = synchronized(lock) { NativePtp.handles(data(0x1007, longArrayOf(storage, 0, 0))) }
-    fun objectInfo(handle: Long): JSONObject = synchronized(lock) {
+    private fun readDevice() {
+        device = JSONObject(NativePtp.info(data(0x1001), true))
+        make = ptpCameraMake(device.optString("manufacturer"), device.optInt("vendor"))
+        operations = device.getJSONArray("operations").let { values -> (0 until values.length()).map { values.getInt(it) }.toSet() }
+    }
+
+    private fun openSonyImport() {
+        // Both device descriptions are read before choosing a function mode, as in the Creators' App initializer.
+        val description = if (0x923a in operations) {
+            val dd = sonyDescription(data(0x923a, longArrayOf(1), 1024 * 1024L))
+            val did = sonyDescription(data(0x923a, longArrayOf(2), 1024 * 1024L))
+            SonyDescription(did.server ?: dd.server, did.transfer ?: dd.transfer)
+        } else SonyDescription()
+        val contentsMode = (description.server ?: 0.0) >= 4.0
+        check(!contentsMode || !description.transfer.equals("Disable", true)) { "机身当前未开放照片传输，请检查智能手机连接设置" }
+        if (contentsMode || 0x9210 in operations) transact(0x9210, longArrayOf(1, if (contentsMode) 2 else 1), false, null, 0)
+        else transact(0x1002, longArrayOf(1), false, null, 0)
+        transaction = 1
+        if (0x9201 in operations && 0x9202 in operations) {
+            fun connectPhase(phase: Long) {
+                transact(0x9201, longArrayOf(phase, 0, 0), false, ByteArrayOutputStream(), 64 * 1024L)
+            }
+            connectPhase(1)
+            connectPhase(2)
+            var version = 0L
+            if (0x9216 in operations) transact(0x9216, longArrayOf(), false, null, 0, onResponse = { version = it.firstOrNull() ?: 0 })
+            val parameters = if (version >= 310) longArrayOf(300, 1) else longArrayOf(300)
+            for (attempt in 1..20) {
+                val ext = data(0x9202, parameters)
+                if (ext.size > 10) { sonyProperties = sonyExtendedProperties(ext); break }
+                check(attempt < 20) { "索尼相机尚未准备好传输，请退出机身菜单后重试" }
+                Thread.sleep(100)
+            }
+            connectPhase(3)
+        }
+        Log.i("OpenBridgeCamera", "Sony import: server=${description.server} catalog=${if (contentsMode) "contents" else "MTP"}")
+        if (contentsMode) {
+            sonyReportSize = sonyProperty(0xe116)?.let { it.enabled == 1 && it.value >= 101 } == true
+            sonyContents = SonyContentsCatalog({ op, params -> data(op, params) }, ::sonySlots)
+            return
+        }
+        if (0x9212 in operations) {
+            transact(0x9212, longArrayOf(2, 1, 0), false, null, 0)
+            sonyMtpTransfer = true
+        }
+        for (attempt in 1..25) {
+            try { if (storageIds().isNotEmpty()) return }
+            catch (error: PtpResponseException) { if (error.response != 0x2013 && error.response != 0x2019) throw error }
+            if (attempt < 25) Thread.sleep(300)
+        }
+        error("索尼相机已连接，但存储卡尚未就绪，请检查机身或重试")
+    }
+
+    fun finishSonyImport() = synchronized(lock) {
+        if (!connected || make != CameraMake.SONY) return@synchronized
+        if (sonyMtpTransfer) transact(0x9212, longArrayOf(2, 0, 1), false, null, 0)
+        transact(0x1003, longArrayOf(), false, null, 0)
+        Unit
+    }
+
+    private fun sonyProperty(code: Int): SonyScalar? {
+        if (0x9251 !in operations || code !in sonyProperties) return null
+        return try { sonyScalar(data(0x9251, longArrayOf(code.toLong())), code) }
+        catch (error: PtpResponseException) {
+            if (error.response !in setOf(0x2005, 0x200a, 0x201d)) throw error
+            null
+        }
+    }
+
+    private fun sonySlots(): List<Int> {
+        val advertised = (1..2).filter { 0xd1d3 + it in sonyProperties }
+        return advertised.ifEmpty { listOf(1, 2) }.filter { slot ->
+            val state = sonyProperty(0xd1d3 + slot)
+            state == null || (state.enabled in 1..2 && state.value == 3L)
+        }
+    }
+
+    fun sonyCatalogCursor(storage: Long? = null, direction: CatalogDirection = CatalogDirection.NEWEST,
+        startAt: SonyCaptureDay? = null): SonyContentsCatalog.Cursor? = synchronized(lock) {
+        sonyContents?.cursor(storage?.toInt(), direction, startAt)
+    }
+    fun nextSonyPage(cursor: SonyContentsCatalog.Cursor): List<Long> = synchronized(lock) { cursor.next() }
+    fun storageIds(): LongArray = synchronized(lock) {
+        if (sonyContents != null) sonySlots().map(Int::toLong).toLongArray() else NativePtp.handles(data(0x1004))
+    }
+    fun objectHandles(storage: Long): LongArray = synchronized(lock) {
+        check(sonyContents == null) { "索尼内容目录需要按拍摄日期读取" }
+        NativePtp.handles(data(0x1007, longArrayOf(storage, 0, 0)))
+    }
+    fun objectInfo(handle: Long, verify: Boolean = false): JSONObject = synchronized(lock) {
+        sonyContents?.let { catalog ->
+            val file = if (verify) catalog.verify(handle).also { sonyOriginal = it; sonyReadStamp = null } else catalog.file(handle)
+            return@synchronized file.info()
+        }
         val info = JSONObject(NativePtp.info(data(0x1008, longArrayOf(handle)), false))
         if (info.getLong("size") == 0xffff_ffffL && 0x9803 in operations) {
             try {
@@ -104,9 +214,12 @@ internal class PtpLink(
         }
         info
     }
-    fun supportsPartial(size: Long): Boolean = 0x9431 in operations || (0x101b in operations && size < 0xffff_ffffL)
+    private fun largePartialOp(): Int? = 0x9431.takeIf { make == CameraMake.NIKON && it in operations }
+
+    val chunkSize: Int get() = if (make == CameraMake.SONY) SONY_CHUNK else 1024 * 1024
+    fun supportsPartial(size: Long): Boolean = make == CameraMake.SONY || largePartialOp() != null || (0x101b in operations && size < 0xffff_ffffL)
     fun ping() = synchronized(lock) { data(0x1001); Unit }
-    fun supportsLocation(): Boolean = 0x9523 in operations
+    fun supportsLocation(): Boolean = make == CameraMake.NIKON && 0x9523 in operations
 
     suspend fun awaitCatalogChange(milliseconds: Long) {
         withTimeoutOrNull(milliseconds) { catalogSignals.receiveCatching() }
@@ -124,6 +237,7 @@ internal class PtpLink(
     }
 
     fun portableJpeg(handle: Long): ByteArray = synchronized(lock) {
+        check(make == CameraMake.NIKON) { "请在导入列表选择机身 JPEG 或 RAW 原片" }
         // FULL_HD/MPF_CLASS2 is a camera-rendered copy, including for supported RAW-only captures.
         for (operation in listOf(0x9522, 0x920f)) {
             if (operation !in operations) continue
@@ -131,7 +245,7 @@ internal class PtpLink(
                 val parameters = if (operation == 0x9522) longArrayOf(handle, 3, 0) else longArrayOf(handle)
                 val bytes = data(operation, parameters)
                 check(bytes.size > 2 && bytes[0] == 0xff.toByte() && bytes[1] == 0xd8.toByte()) {
-                    "相机返回的便携图像不是 JPEG，可能为 HEIF；请选择原格式下载"
+                    "相机返回的便携图像不是 JPEG，可能为 HEIF；请选择原格式导入"
                 }
                 return@synchronized bytes
             } catch (error: PtpResponseException) {
@@ -139,15 +253,13 @@ internal class PtpLink(
                 if (error.response == 0x2005) operations = operations - operation
             }
         }
-        error("相机不支持便携 JPEG 下载，请选择原格式；不会用小缩略图替代")
+        error("相机不支持便携 JPEG 导入，请选择原格式；不会用小缩略图替代")
     }
 
-    fun thumbnail(handle: Long, destination: OutputStream): Long = synchronized(lock) {
-        transact(0x100a, longArrayOf(handle), true, destination, 16L * 1024 * 1024)
-    }
-
-    fun preview(handle: Long, detailed: Boolean): CameraPreview = synchronized(lock) {
-        val nikon = device.optInt("vendor") == 10 || device.optString("manufacturer").startsWith("NIKON", ignoreCase = true)
+    fun preview(photo: RemotePhoto, detailed: Boolean): CameraPreview = synchronized(lock) {
+        val handle = photo.handle
+        if (make == CameraMake.SONY) return@synchronized sonyPreview(photo, detailed)
+        val nikon = make == CameraMake.NIKON
         val candidates = previewCommands(detailed, operations, nikon, rejectedPreviewOperations)
         val level = if (detailed) "detail" else "grid"
         var best: CameraPreview? = null
@@ -155,12 +267,9 @@ internal class PtpLink(
             if (request.operation == GET_THUMB && best != null) break
             try {
                 val bytes = data(request.operation, request.parameters(handle))
-                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-                val dimensions = PreviewDimensions(bounds.outWidth, bounds.outHeight)
+                val dimensions = PreviewImageInfo.read(bytes)?.dimensions ?: continue
                 Log.i("OpenBridgePreview", "$level op=0x${request.operation.toString(16)} advertised=${request.operation in operations}" +
                     " size=${dimensions.width}x${dimensions.height} bytes=${bytes.size}")
-                if (!dimensions.valid) continue
                 if (dimensions.improves(best?.dimensions)) best = CameraPreview(bytes, dimensions, request.operation)
                 if (dimensions.sufficient(detailed)) return@synchronized requireNotNull(best)
             } catch (error: PtpResponseException) {
@@ -169,12 +278,70 @@ internal class PtpLink(
                 if (error.response == 0x2005) rejectedPreviewOperations += request.operation
             }
         }
-        best ?: error("相机没有返回可解码的预览；可尝试下载原片后查看")
+        best ?: error("相机没有返回可解码的预览；可尝试导入原片后查看")
     }
 
-    fun partial(handle: Long, offset: Long, count: Int, destination: OutputStream): Long = synchronized(lock) {
+    /** Read only the start of a Nikon original when a visible preview needs its EXIF. Never fall back to GetObject here. */
+    fun nikonPhotoHeader(photo: RemotePhoto): ByteArray? = synchronized(lock) {
+        val size = photo.asset.sizeBytes
+        if (make != CameraMake.NIKON || photo.asset.format !in setOf(MediaFormat.JPEG, MediaFormat.RAW) ||
+            size <= 0 || !supportsPartial(size)) return@synchronized null
+        val count = minOf(size, 64L * 1024).toInt()
+        val bytes = ByteArrayOutputStream(count)
+        try {
+            partial(photo.handle, 0, count, bytes, firstRead = true)
+        } catch (_: PtpResponseException) { return@synchronized null }
+        catch (unsupported: IllegalStateException) { if (!supportsPartial(size)) return@synchronized null else throw unsupported }
+        bytes.toByteArray()
+    }
+
+    private fun sonyPreview(photo: RemotePhoto, detailed: Boolean): CameraPreview {
+        val handle = photo.handle
+        val file = sonyContents?.file(handle)
+        if (file != null) {
+            check(cameraObjectId(file.info(), photo.cameraIdentity) == photo.asset.id) {
+                "照片目录已更换，请刷新后查看预览"
+            }
+        }
+        val requests = when {
+            file != null -> buildList {
+                add(SONY_PREVIEW to file.ref.preview(detailed))
+                if (detailed) add(SONY_PREVIEW to file.ref.preview(false))
+            }
+            else -> buildList {
+                if (0x9803 !in rejectedPreviewOperations) {
+                    if (detailed) add(0x9803 to longArrayOf(handle, SONY_SCREEN_PROP.toLong()))
+                    add(0x9803 to longArrayOf(handle, SONY_THUMB_PROP.toLong()))
+                }
+                add(GET_THUMB to longArrayOf(handle))
+            }
+        }
+        var best: CameraPreview? = null
+        for ((op, params) in requests) {
+            if (op in rejectedPreviewOperations) continue
+            val response = try { data(op, params) } catch (error: PtpResponseException) {
+                if (op == 0x9803 && error.response == 0x2005) rejectedPreviewOperations += op
+                if (canTryAnotherPreview(error.response) || error.response in setOf(0xa801, 0xa80a)) continue
+                throw error
+            }
+            val bytes = if (op == 0x9803) sonyPreviewProperty(response) ?: continue else response
+            val info = PreviewImageInfo.read(bytes) ?: continue
+            val extension = if (info.mimeType.startsWith("image/hei")) "heic" else "jpg"
+            if (info.dimensions.improves(best?.dimensions)) best = CameraPreview(bytes, info.dimensions, op, extension)
+            if (info.dimensions.sufficient(detailed)) return checkNotNull(best)
+        }
+        return best ?: error("机身未提供可显示的预览，可导入原片查看")
+    }
+
+    fun partial(handle: Long, offset: Long, count: Int, destination: OutputStream, firstRead: Boolean): Long = synchronized(lock) {
         require(offset >= 0)
         require(count in 1..(4 * 1024 * 1024))
+        if (make == CameraMake.SONY) {
+            val file = sonyContents?.file(handle)
+            if (file != null) return@synchronized readSonyFile(file, offset, count, destination, firstRead)
+            val args = longArrayOf(handle, offset and 0xffff_ffffL, offset ushr 32, SONY_CHUNK.toLong())
+            return@synchronized transact(0x9211, args, true, destination, count.toLong())
+        }
         if (offset <= 0xffff_ffffL && 0x101b in operations) {
             try {
                 return@synchronized transact(0x101b, longArrayOf(handle, offset, count.toLong()), true, destination, count.toLong())
@@ -184,17 +351,43 @@ internal class PtpLink(
                 if (error.receivedBytes > 0) throw error
             }
         }
-        check(0x9431 in operations) { "分段读取不可用；重试时将改为整文件传输" }
+        val operation = checkNotNull(largePartialOp()) { "分段读取不可用；重试时将改为整文件传输" }
+        val parameters = longArrayOf(handle, offset and 0xffff_ffffL, offset ushr 32, count.toLong())
         try {
-            transact(0x9431, longArrayOf(handle, offset and 0xffff_ffffL, offset ushr 32, count.toLong(), 0), true, destination, count.toLong())
+            transact(operation, if (make == CameraMake.NIKON) parameters + 0L else parameters, true, destination, count.toLong())
         } catch (error: PtpResponseException) {
-            if (error.response == 0x2005) operations = operations - 0x9431
+            if (error.response == 0x2005) operations = operations - operation
             throw error
         }
     }
 
+    private fun readSonyFile(file: SonyMediaFile, offset: Long, count: Int, destination: OutputStream, firstRead: Boolean): Long {
+        check(file == sonyOriginal) { "传输中的原片已重新编目，请刷新后重新选择" }
+        check(offset < file.size && count <= file.size - offset) { "读取范围超出原片大小，请刷新导入列表" }
+        val reportSize = firstRead && sonyReportSize
+        val args = file.ref.chunk(offset, count, reportSize)
+        var metadata = longArrayOf()
+        val received = transact(SONY_FILE, args, true, destination, count.toLong(), onResponse = { metadata = it })
+        fun longParam(index: Int) = metadata[index] or (metadata[index + 1] shl 32)
+        if (metadata.size >= 2) {
+            val updated = longParam(0)
+            val reference = sonyReadStamp ?: file.modifiedUtc
+            check(reference <= 0 || updated <= reference) { "传输期间机身上的文件已修改，请刷新后重新选择原片" }
+            if (updated > 0) sonyReadStamp = updated
+        }
+        if (reportSize && metadata.size >= 4) check(longParam(2) == file.size) { "机身文件大小已变化，请刷新后重新选择原片" }
+        if (offset + received == file.size) {
+            try {
+                finishSonyPayload(offset + received, file.size) {
+                    transact(SONY_FILE, file.ref.finish(), false, ByteArrayOutputStream(1), 1)
+                }?.let { Log.i("OpenBridgeCamera", "Sony file fully received; final release acknowledgement unavailable", it) }
+            } finally { sonyOriginal = null; sonyReadStamp = null }
+        }
+        return received
+    }
+
     fun registrationCode(): String = synchronized(lock) {
-        check(0x952b in operations && 0x935a in operations) { "这台相机未报告主机登记能力，请使用机身连接向导" }
+        check(make == CameraMake.NIKON && 0x952b in operations && 0x935a in operations) { "这台相机未报告主机登记能力，请使用机身连接向导" }
         val bytes = data(0x952b)
         val count = if (bytes.size >= 4) bytes.uint(0).toInt() else 0
         check(count in 1..16 && bytes.size >= 4 + count && bytes.copyOfRange(4, 4 + count).all { it.toInt() in 0..9 }) {
@@ -203,21 +396,26 @@ internal class PtpLink(
         bytes.copyOfRange(4, 4 + count).joinToString("") { it.toString() }
     }
 
-    fun confirmRegistration() = synchronized(lock) { transact(0x935a, longArrayOf(0x2001), false, null, 0); Unit }
+    fun confirmRegistration() = synchronized(lock) {
+        check(make == CameraMake.NIKON && 0x935a in operations) { "当前相机未提供尼康主机登记" }
+        transact(0x935a, longArrayOf(0x2001), false, null, 0)
+        Unit
+    }
 
     fun original(handle: Long, destination: OutputStream, maximum: Long, progress: (Long) -> Unit): Long = synchronized(lock) {
+        check(make != CameraMake.SONY) { "索尼原片需要分段读取" }
         transact(0x1009, longArrayOf(handle), true, destination, maximum, progress = progress)
     }
 
-    private fun data(operation: Int, params: LongArray = longArrayOf()): ByteArray {
+    private fun data(operation: Int, params: LongArray = longArrayOf(), maximum: Long = 16L * 1024 * 1024): ByteArray {
         val bytes = ByteArrayOutputStream()
-        transact(operation, params, true, bytes, 16L * 1024 * 1024)
+        transact(operation, params, true, bytes, maximum)
         return bytes.toByteArray()
     }
 
     private fun transact(
         operation: Int, params: LongArray, receive: Boolean, sink: OutputStream?, maximum: Long,
-        outgoing: ByteArray? = null, progress: (Long) -> Unit = {}
+        outgoing: ByteArray? = null, progress: (Long) -> Unit = {}, onResponse: ((LongArray) -> Unit)? = null
     ): Long {
         val id = transaction
         if (transaction > 0) transaction++
@@ -245,7 +443,7 @@ internal class PtpLink(
                 var remaining = length - 8
                 when (type) {
                     9 -> {
-                        check(remaining in setOf(8L, 12L) && declared < 0 && receive) { "重复或无效的数据开始包" }
+                        check(remaining in setOf(8L, 12L) && declared < 0 && sink != null) { "重复或无效的数据开始包" }
                         val start = ByteArray(remaining.toInt()).also { input.readFully(it) }
                         check(start.uint(0) == id) { "PTP 事务号不匹配" }
                         declared = if (start.size == 12) ByteBuffer.wrap(start, 4, 8).order(ByteOrder.LITTLE_ENDIAN).long else start.uint(4)
@@ -278,8 +476,14 @@ internal class PtpLink(
                         check(response.uint(2) == id) { "PTP 响应事务号不匹配" }
                         val code = (response[0].toInt() and 255) or ((response[1].toInt() and 255) shl 8)
                         if (tracePreview) Log.i("OpenBridgePreview", "wire op=0x${operation.toString(16)} response=0x${code.toString(16)}")
-                        if (code != 0x2001) throw PtpResponseException(operation, code, received)
-                        check(!receive || (ended && received == declared)) { "数据尚未完整接收，相机提前返回成功" }
+                        if (code != 0x2001) {
+                            val detail = "PTP/IP　0x${operation.toString(16)} → 0x${code.toString(16)}"
+                            Log.w("OpenBridgeCamera", detail)
+                            diagnostic(detail)
+                            throw PtpResponseException(operation, code, received)
+                        }
+                        check((!receive && declared < 0) || (ended && received == declared)) { "数据尚未完整接收，相机提前返回成功" }
+                        onResponse?.invoke(LongArray((response.size - 6) / 4) { response.uint(6 + 4 * it) })
                         return received
                     }
                     13 -> { check(remaining == 0L); output.write(packet(14)); output.flush() }
@@ -288,23 +492,19 @@ internal class PtpLink(
             }
         } catch (error: PtpResponseException) {
             throw error
+        } catch (cancelled: CancellationException) {
+            closeWithCause(cancelled)
+            throw cancelled
         } catch (error: Exception) {
-            val failure = IOException("传输中断（操作 0x${operation.toString(16)}，$received/$declared 字节，结束包=$ended，末包=$lastType）：" +
-                (error.message ?: error.javaClass.simpleName), error)
+            val detail = "PTP/IP 0x${operation.toString(16)} stage=$lastType bytes=$received/$declared end=$ended"
+            Log.w("OpenBridgeCamera", detail, error)
+            diagnostic(detail)
+            val message = if (error.message.orEmpty().contains("ENOSPC")) "手机空间不足，请腾出空间后重试"
+                else "相机传输中断，请检查 Wi-Fi 连接后重试"
+            val failure = IOException(message, error)
             closeWithCause(failure)
             throw failure
         }
-    }
-
-    private fun openSocket(): Socket {
-        val socket = network?.socketFactory?.createSocket() ?: Socket()
-        try {
-            socket.soTimeout = 15000
-            socket.tcpNoDelay = true
-            val address = network?.getAllByName(host)?.firstOrNull()
-            socket.connect(if (address != null) InetSocketAddress(address, port) else InetSocketAddress(host, port), 15000)
-            return socket
-        } catch (error: Exception) { socket.close(); throw error }
     }
 
     override fun close() = closeWithCause(null)
@@ -314,8 +514,7 @@ internal class PtpLink(
         val notify = connected && error != null
         connected = false
         catalogSignals.close()
-        runCatching { commandSocket?.close() }
-        runCatching { eventSocket?.close() }
+        transport.close()
         if (notify) onDisconnected(requireNotNull(error))
     }
 

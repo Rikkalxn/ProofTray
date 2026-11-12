@@ -6,19 +6,18 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.FilledTonalButton
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.Box
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -28,169 +27,280 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import org.openbridge.app.camera.CameraConnection
+import org.openbridge.app.camera.CameraMake
 import org.openbridge.app.camera.CameraMode
+import org.openbridge.app.camera.ConnectionPhase
+import org.openbridge.app.camera.SonyAccess
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+internal enum class CameraPanel { SEARCH, MANUAL, DIAGNOSTICS }
+
 @Composable
-fun CameraScreen(state: LibraryUiState, actions: LibraryActions, onBrowse: () -> Unit) {
-    var modeIndex by rememberSaveable { mutableStateOf(0) }
-    var host by rememberSaveable { mutableStateOf("") }
-    var ssid by rememberSaveable { mutableStateOf("") }
-    var password by rememberSaveable { mutableStateOf("") }
-    var port by rememberSaveable { mutableStateOf("15740") }
-    var advanced by rememberSaveable { mutableStateOf(false) }
-    var specifyHotspot by rememberSaveable { mutableStateOf(false) }
-    var showRegistration by rememberSaveable { mutableStateOf(false) }
-    var showBluetoothHistory by rememberSaveable { mutableStateOf(false) }
-    val view = LocalView.current
-    DisposableEffect(view, state.ble.pairingInProgress) {
-        val previous = view.keepScreenOn
-        view.keepScreenOn = state.ble.pairingInProgress
-        onDispose { view.keepScreenOn = previous }
+internal fun CameraScreen(
+    state: LibraryUiState, actions: LibraryActions, onBrowse: () -> Unit, onRegister: () -> Unit,
+    modifier: Modifier = Modifier, initialPanel: CameraPanel? = null, importing: Boolean = false
+) {
+    var panel by rememberSaveable { mutableStateOf(initialPanel) }
+    var menu by remember { mutableStateOf(false) }
+    fun openPanel(next: CameraPanel?) {
+        menu = false
+        if (panel == CameraPanel.SEARCH && next != panel) actions.onStopBleScan()
+        panel = next
+        if (next == CameraPanel.SEARCH && !state.ble.scanning) actions.onScanBle()
     }
-    val mode = if (modeIndex == 0) CameraMode.AP else CameraMode.STA
-    LazyColumn(contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    BackHandler(enabled = panel != null) { openPanel(null) }
+    val summary = cameraConnectionSummary(state)
+    val saved = state.settings.selectedAddress.isNotBlank()
+    val nikon = saved && !state.settings.sonySelected && state.camera.make != CameraMake.SONY
+    val name = if (state.camera.connected) state.camera.cameraName else state.settings.selectedName
+    LaunchedEffect(initialPanel) {
+        if (initialPanel == CameraPanel.SEARCH && !state.ble.scanning) actions.onScanBle()
+    }
+    val primary = cameraPrimaryAction(state, summary, importing)
+    LazyColumn(modifier = modifier, contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
-            SectionCard(state.camera.cameraName.ifBlank { "相机连接" }, state.camera.stage, BridgeGlyph.CAMERA) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    StatusBadge(if (state.camera.connected) "Wi‑Fi 已连接" else "Wi‑Fi 未连接", active = state.camera.connected)
-                    if (state.ble.systemPaired) StatusBadge("系统已配对", active = true)
-                    else if (state.ble.authenticated) StatusBadge("身份已验证", active = true)
-                    if (state.camera.busy) LoadingIndicator(modifier = Modifier.size(32.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(name.ifBlank { "我的相机" }, style = MaterialTheme.typography.headlineSmall)
+                        Text(summary.title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Box {
+                        IconButton(onClick = { menu = true }) { BridgeIcon(BridgeGlyph.MORE, "连接选项") }
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            val changeReason = when {
+                                state.camera.connected -> "先断开当前相机"
+                                summary.busy -> "等待当前连接操作完成"
+                                !state.ble.adapterEnabled -> "先打开手机蓝牙"
+                                state.automatic.transferring -> "先停止蓝牙接收"
+                                else -> null
+                            }
+                            ConnectionMenuItem("添加或切换相机", changeReason) { openPanel(CameraPanel.SEARCH) }
+                            ConnectionMenuItem("手动连接 Wi-Fi", "等待当前连接操作完成".takeIf { summary.busy }) { openPanel(CameraPanel.MANUAL) }
+                            DropdownMenuItem(text = { Text("连接诊断") }, onClick = { openPanel(CameraPanel.DIAGNOSTICS) })
+                        }
+                    }
                 }
-                if (state.camera.total > 0) {
-                    LinearProgressIndicator(progress = { (state.camera.indexed.toFloat() / state.camera.total).coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth())
-                    Text("已读取 ${state.camera.indexed} / ${state.camera.total} 项", style = MaterialTheme.typography.bodySmall)
+                val failed = state.camera.connectionPhase == ConnectionPhase.FAILED && !summary.busy && !state.camera.connected
+                if (summary.busy || state.automatic.transferring || (saved && !summary.bluetoothReady && !state.camera.connected)) {
+                    if (summary.detail.isNotBlank() && summary.detail != state.camera.message) {
+                        Text(summary.detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
-                state.camera.message?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
-                if (state.camera.connected || state.camera.busy || state.ble.wifiRequested) {
+                if (failed) {
+                    ErrorNotice(state.camera.message ?: summary.detail.ifBlank { "Wi-Fi 连接未完成" }) {
+                        if (nikon && !state.camera.bluetoothAssisted) TextButton(onClick = actions.onRetryConnection) { Text("重试上次连接") }
+                        TextButton(onClick = { openPanel(CameraPanel.DIAGNOSTICS) }) { Text("诊断") }
+                    }
+                } else state.camera.message?.let { ErrorNotice(it) }
+                if (summary.busy) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
+                if (primary.action != CameraAction.NONE && (primary.action != CameraAction.ADD || panel != CameraPanel.SEARCH)) {
+                    PrimaryAction(primary.label, {
+                        performCameraAction(primary.action, actions, onBrowse, ::openPanel)
+                    }, enabled = primary.action != CameraAction.NONE, modifier = Modifier.fillMaxWidth(), glyph = primary.glyph)
+                }
+                if (nikon) {
+                    val wifi = state.camera.connected
+                    val bluetooth = state.ble.authenticated && state.ble.systemPaired && !state.ble.pairingInProgress
+                    val reconnectBle = failed && bluetooth
+                    val canSwitchBluetooth = wifi || (!state.automatic.transferring && (!bluetooth || reconnectBle))
+                    val label = when {
+                        wifi -> "切换到蓝牙"
+                        !state.ble.adapterEnabled -> "打开手机蓝牙"
+                        state.ble.pairingInProgress -> "正在连接蓝牙"
+                        state.automatic.transferring -> "蓝牙传图中"
+                        reconnectBle -> "重新连接蓝牙"
+                        bluetooth -> "蓝牙已连接"
+                        else -> "连接蓝牙"
+                    }
+                    val statusOnly = !wifi && state.ble.adapterEnabled &&
+                        (state.ble.pairingInProgress || state.automatic.transferring || (bluetooth && !reconnectBle))
+                    if (statusOnly) Row(Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        BridgeIcon(BridgeGlyph.BLUETOOTH)
+                        Text(label, style = MaterialTheme.typography.bodyMedium)
+                    } else {
+                        val enabled = !state.camera.connecting && !state.ble.pairingInProgress &&
+                            (!state.ble.adapterEnabled || canSwitchBluetooth)
+                        OutlinedButton(onClick = if (state.ble.adapterEnabled) actions.onSwitchToBluetooth else actions.onOpenBluetoothSettings,
+                            enabled = enabled, modifier = Modifier.fillMaxWidth()) { Text(label) }
+                        if (!enabled) Text("等待当前连接操作完成", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                val canDisconnect = state.camera.connected || state.camera.sonyControlConnected ||
+                    state.ble.authenticated || state.automatic.transferring
+                if (!summary.busy && canDisconnect) {
+                    OutlinedButton(onClick = actions.onDisconnectCamera, modifier = Modifier.fillMaxWidth()) { Text("断开相机") }
+                }
+                if (nikon && !summary.busy && state.ble.adapterEnabled && !state.camera.connected) {
+                    if (state.automatic.transferring) TextButton(onClick = actions.onDisconnectControl) { Text("停止蓝牙接收") }
+                    else if (summary.bluetoothReady) TextButton(onClick = actions.onCheckBluetoothTransfers) { Text("接收待传 JPEG") }
+                }
+            }
+        }
+        item {
+            AnimatedVisibility(panel == CameraPanel.SEARCH) {
+                SectionCard("添加 / 切换相机", "在机身的智能手机连接菜单中开始配对。", BridgeGlyph.BLUETOOTH) {
+                    if (state.ble.scanning) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Text(state.ble.message, style = MaterialTheme.typography.bodySmall)
+                    if (!state.ble.scanning && state.ble.cameras.isEmpty()) Text("未发现相机")
+                    state.ble.cameras.forEach { camera ->
+                        OutlinedButton(onClick = { panel = null; actions.onConnectBle(camera) },
+                            enabled = !summary.busy && !state.camera.connected, modifier = Modifier.fillMaxWidth()) {
+                            Text(camera.name)
+                        }
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (state.camera.connected) FilledTonalButton(onClick = actions.onRefreshCamera, enabled = !state.camera.busy) {
-                            Text("刷新照片")
+                        TextButton(onClick = actions.onScanBle, enabled = !state.ble.scanning && !summary.busy && !state.camera.connected) {
+                            Text("重新搜索")
                         }
-                        TextButton(onClick = actions.onDisconnectCamera) { Text(if (state.camera.connecting) "取消连接" else "断开连接") }
+                        TextButton(onClick = { openPanel(null) }) { Text("停止搜索") }
                     }
+                    Text("手机和机身出现配对码时，请核对后确认。", style = MaterialTheme.typography.bodySmall)
                 }
-                if (state.camera.connected) PrimaryAction("开始选片", onBrowse, modifier = Modifier.fillMaxWidth(), glyph = BridgeGlyph.PHOTOS)
             }
         }
+        item { ManualConnection(state, actions, visible = panel == CameraPanel.MANUAL, onRegister = onRegister) }
         item {
-            SectionCard("通过 Wi‑Fi 传图", "选择相机热点，或让手机与相机加入同一网络。", BridgeGlyph.WIFI) {
-                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                    listOf("相机热点", "同一局域网").forEachIndexed { index, label ->
-                        SegmentedButton(selected = modeIndex == index, onClick = { modeIndex = index },
-                            shape = SegmentedButtonDefaults.itemShape(index, 2)) { Text(label) }
-                    }
-                }
-                if (mode == CameraMode.AP) {
-                    Text("在相机上开启 Wi‑Fi 热点，手机连接后即可继续。", style = MaterialTheme.typography.bodyMedium)
-                    FilledTonalButton(onClick = actions.onOpenWifi, modifier = Modifier.fillMaxWidth()) { Text("打开手机 Wi‑Fi") }
-                    TextButton(onClick = { specifyHotspot = !specifyHotspot }) {
-                        Text(if (specifyHotspot) "收起热点信息" else "手动填写热点信息")
-                    }
-                    AnimatedVisibility(specifyHotspot) {
-                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            OutlinedTextField(ssid, { ssid = it }, label = { Text("热点名称") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                            OutlinedTextField(password, { password = it }, label = { Text("热点密码") }, singleLine = true,
-                                modifier = Modifier.fillMaxWidth(), visualTransformation = PasswordVisualTransformation())
-                        }
-                    }
-                } else {
-                    Text("手机与相机需连接同一路由器。可以搜索相机，也可以直接填写地址。", style = MaterialTheme.typography.bodyMedium)
-                    FilledTonalButton(onClick = actions.onDiscoverCamera, modifier = Modifier.fillMaxWidth()) { Text("搜索局域网相机") }
-                    state.cameraEndpoints.forEach { endpoint ->
-                        OutlinedButton(onClick = { host = endpoint.host; port = endpoint.port.toString() }, modifier = Modifier.fillMaxWidth()) {
-                            Column { Text(endpoint.name); Text(endpoint.host, style = MaterialTheme.typography.labelSmall) }
-                        }
-                    }
-                    OutlinedTextField(host, { host = it }, label = { Text("相机 IP 地址") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                }
-                TextButton(onClick = { advanced = !advanced }) { Text(if (advanced) "收起高级选项" else "高级连接选项") }
-                AnimatedVisibility(advanced) {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        if (mode == CameraMode.AP) OutlinedTextField(host, { host = it }, label = { Text("相机 IP，留空使用热点网关") },
-                            singleLine = true, modifier = Modifier.fillMaxWidth())
-                        OutlinedTextField(port, { port = it }, label = { Text("PTP/IP 端口") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                        if (state.camera.connected) TextButton(onClick = { showRegistration = true }) { Text("首次 STA：登记当前手机") }
-                    }
-                }
-                PrimaryAction("连接相机", onClick = {
-                    actions.onConnectCamera(CameraConnection(mode, host, port.toInt(),
-                        if (specifyHotspot) ssid else "", if (specifyHotspot) password else ""))
-                }, modifier = Modifier.fillMaxWidth(), enabled = state.camera.canConnect && (port.toIntOrNull() ?: 0) in 1..65535,
-                    glyph = BridgeGlyph.CAMERA)
-            }
-        }
-        item {
-            SectionCard("蓝牙配对", "先完成配对，再唤醒相机的 Wi‑Fi。原片通过 Wi‑Fi 传输。", BridgeGlyph.BLUETOOTH) {
-                Text(state.ble.message, style = MaterialTheme.typography.bodyMedium)
-                if (state.ble.history.isNotEmpty()) {
-                    TextButton(onClick = { showBluetoothHistory = !showBluetoothHistory }) {
-                        Text(if (showBluetoothHistory) "收起连接过程" else "查看连接过程")
-                    }
-                    AnimatedVisibility(showBluetoothHistory) {
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            state.ble.history.forEachIndexed { index, message ->
+            AnimatedVisibility(panel == CameraPanel.DIAGNOSTICS) {
+                SectionCard("连接诊断", glyph = BridgeGlyph.SETTINGS) {
+                    SelectionContainer {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Wi-Fi：${state.camera.stage}")
+                            state.camera.protocolDiagnostic?.let { Text(it) }
+                            state.camera.message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                            TextButton(onClick = actions.onOpenWifi) { Text("系统 Wi-Fi 面板") }
+                            if (!state.settings.sonySelected) Text("蓝牙：${state.ble.message}")
+                            if (!state.settings.sonySelected) state.ble.history.forEachIndexed { index, message ->
                                 Text("${index + 1}. $message", style = MaterialTheme.typography.bodySmall)
                             }
                         }
                     }
-                }
-                FilledTonalButton(onClick = actions.onScanBle, enabled = !state.ble.scanning && !state.ble.pairingInProgress,
-                    modifier = Modifier.fillMaxWidth()) {
-                    Text(if (state.ble.scanning) "正在搜索相机…" else "搜索蓝牙相机")
-                }
-                state.ble.cameras.forEach { camera ->
-                    OutlinedButton(onClick = { actions.onConnectBle(camera) }, enabled = !state.ble.pairingInProgress,
-                        modifier = Modifier.fillMaxWidth()) {
-                        Text("${camera.name} · ${if (camera.classic) "完成系统配对" else "连接"}")
-                    }
-                }
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = actions.onDiscoverClassic, enabled = !state.ble.pairingInProgress) { Text("完成系统配对") }
-                    if (state.ble.systemPaired || state.settings.transferAddress.isNotBlank()) {
-                        FilledTonalButton(onClick = actions.onWakeWifi, enabled = !state.ble.pairingInProgress) {
-                            Text(if (state.ble.authenticated) "开启相机 Wi-Fi" else "连接蓝牙并开启 Wi-Fi")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (!state.settings.sonySelected) {
+                            TextButton(onClick = actions.onDiscoverClassic, enabled = saved && !summary.busy && !state.camera.connected) {
+                                Text("重新检查配对")
+                            }
                         }
+                        TextButton(onClick = actions.onOpenBluetoothSettings) { Text("系统蓝牙设置") }
+                    }
+                    if (state.camera.connected && state.camera.make == CameraMake.NIKON) {
+                        TextButton(onClick = actions.onDisconnectWifi) { Text("仅断开 Wi-Fi") }
                     }
                 }
-                if (state.ble.wifiRequested) Text("Wi-Fi 优先，蓝牙自动传图暂候。连接后可到导入页选片。", style = MaterialTheme.typography.bodySmall)
-                if (state.ble.pairingInProgress || state.ble.authenticated) TextButton(onClick = actions.onDisconnectControl) {
-                    Text(if (state.ble.pairingInProgress) "停止等待配对" else "断开蓝牙")
-                }
-                Text("首次使用时，在相机中进入“连接至智能设备 → 开始配对”，并按机身与系统提示确认。",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        item {
-            Text("连接功能仍在实机验证阶段。遇到问题时，保留连接提示和响应码，便于定位。",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (panel == CameraPanel.MANUAL || panel == CameraPanel.DIAGNOSTICS) item {
+            TextButton(onClick = { openPanel(null) }) { Text("收起") }
         }
     }
-    if (showRegistration) AlertDialog(onDismissRequest = { showRegistration = false }, title = { Text("登记当前手机") },
-        text = { Text("此步骤用于首次 STA 连接。相机需已连接，并支持主机登记。开始后请核对机身配对码。") },
-        confirmButton = { TextButton(onClick = { showRegistration = false; actions.onBeginRegistration() }) { Text("开始登记") } },
-        dismissButton = { TextButton(onClick = { showRegistration = false }) { Text("取消") } })
-    state.camera.pairingCode?.let { code ->
-        AlertDialog(onDismissRequest = {}, title = { Text("核对机身配对码") },
-            text = { Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Text(code, style = MaterialTheme.typography.headlineLarge)
-                Text("确认与相机显示一致，并在机身完成确认后，再继续。")
-            } },
-            confirmButton = { TextButton(onClick = actions.onConfirmRegistration) { Text("已核对，完成登记") } },
-            dismissButton = { TextButton(onClick = actions.onDisconnectCamera) { Text("取消并断开") } })
+
+}
+
+@Composable
+private fun ConnectionMenuItem(title: String, disabledReason: String?, onClick: () -> Unit) {
+    DropdownMenuItem(enabled = disabledReason == null, onClick = onClick, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title)
+            if (disabledReason != null) Text(disabledReason, style = MaterialTheme.typography.bodySmall)
+        }
+    })
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ManualConnection(state: LibraryUiState, actions: LibraryActions, visible: Boolean, onRegister: () -> Unit) {
+    var modeIndex by rememberSaveable { mutableStateOf(0) }
+    var apHost by rememberSaveable { mutableStateOf("") }
+    var staHost by rememberSaveable { mutableStateOf("") }
+    var ssid by rememberSaveable { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var port by rememberSaveable { mutableStateOf("15740") }
+    var advanced by rememberSaveable { mutableStateOf(false) }
+    var manualAuth by remember { mutableStateOf(false) }
+    var user by remember { mutableStateOf("") }
+    var secret by remember { mutableStateOf("") }
+    var fingerprint by remember { mutableStateOf("") }
+    val access = remember(manualAuth, user, secret, fingerprint) {
+        if (manualAuth) runCatching { SonyAccess(user.trim(), secret, fingerprint) }.getOrNull() else null
+    }
+    val mode = if (modeIndex == 0) CameraMode.AP else CameraMode.STA
+    val host = if (mode == CameraMode.AP) apHost else staHost
+    val portNumber = port.toIntOrNull()
+    val enabled = !state.camera.connecting && !state.ble.pairingInProgress
+    AnimatedVisibility(visible) {
+        SectionCard("手动连接", glyph = BridgeGlyph.WIFI) {
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                listOf("相机热点", "同一局域网").forEachIndexed { index, label ->
+                    SegmentedButton(selected = modeIndex == index, onClick = { modeIndex = index }, enabled = enabled,
+                        shape = SegmentedButtonDefaults.itemShape(index, 2)) { Text(label) }
+                }
+            }
+            if (mode == CameraMode.AP) {
+                Text("先开启相机热点", style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(ssid, { ssid = it }, label = { Text("热点名称（留空使用当前 Wi-Fi）") }, singleLine = true,
+                    enabled = enabled, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(password, { password = it }, label = { Text("热点密码") }, singleLine = true, enabled = enabled,
+                    modifier = Modifier.fillMaxWidth(), visualTransformation = PasswordVisualTransformation())
+                TextButton(onClick = actions.onOpenWifi) { Text("系统 Wi-Fi 设置") }
+            } else {
+                Text("手机与相机连接同一网络，相机保持等待连接。", style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(staHost, { staHost = it }, label = { Text("相机 IP") }, singleLine = true, enabled = enabled,
+                    modifier = Modifier.fillMaxWidth())
+                TextButton(onClick = actions.onDiscoverCamera, enabled = enabled) { Text("搜索局域网相机") }
+                state.cameraEndpoints.forEach { endpoint ->
+                    OutlinedButton(onClick = {
+                        staHost = endpoint.host
+                        port = endpoint.port.toString()
+                        manualAuth = endpoint.make == CameraMake.SONY && !state.settings.sonySelected
+                    }, enabled = enabled) {
+                        Text("${endpoint.name} · ${endpoint.host}")
+                    }
+                }
+                if (state.camera.connected && state.camera.make == CameraMake.NIKON) {
+                    TextButton(onClick = onRegister) { Text("首次连接：登记手机") }
+                }
+            }
+            TextButton(onClick = { advanced = !advanced }) { Text(if (advanced) "收起端口与地址" else "端口与地址") }
+            AnimatedVisibility(advanced) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (mode == CameraMode.AP) OutlinedTextField(apHost, { apHost = it }, label = { Text("相机 IP（留空使用热点网关）") },
+                        singleLine = true, enabled = enabled, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(port, { port = it }, label = { Text("PTP/IP 端口") }, singleLine = true, enabled = enabled,
+                        modifier = Modifier.fillMaxWidth())
+                }
+            }
+            TextButton(onClick = { manualAuth = !manualAuth; if (!manualAuth) secret = "" }, enabled = enabled) {
+                Text(if (manualAuth) "收起索尼访问认证" else "手动输入索尼访问认证")
+            }
+            if (manualAuth) {
+                Text("请查看机身「访问认证信息」。", style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(user, { user = it }, label = { Text("相机用户名") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(secret, { secret = it }, label = { Text("访问密码") }, singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(fingerprint, { fingerprint = it }, label = { Text("机身 SHA-256 指纹") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth())
+            }
+            PrimaryAction("连接", onClick = {
+                if (portNumber != null) actions.onConnectCamera(CameraConnection(mode, host, portNumber,
+                    if (mode == CameraMode.AP) ssid else "", if (mode == CameraMode.AP) password else "",
+                    sonyAccess = access, sonyCamera = manualAuth))
+                if (manualAuth) secret = ""
+            }, modifier = Modifier.fillMaxWidth(), enabled = enabled && portNumber != null && portNumber in 1..65535 &&
+                (!manualAuth || access != null) && (mode == CameraMode.AP || host.isNotBlank()), glyph = BridgeGlyph.CAMERA)
+        }
     }
 }

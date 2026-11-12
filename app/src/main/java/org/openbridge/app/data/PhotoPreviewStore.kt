@@ -1,7 +1,7 @@
 package org.openbridge.app.data
 
+import org.openbridge.app.io.writeAtomically
 import android.content.Context
-import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.AtomicFile
 import java.io.File
@@ -13,16 +13,19 @@ import org.openbridge.app.domain.PhotoAsset
 internal class PhotoPreviewStore(context: Context) {
     private val saved = File(context.filesDir, "photo-previews")
     private val current = File(context.cacheDir, "camera-previews-v2")
-    private val legacy = File(context.cacheDir, "camera-thumbnails")
 
     fun candidates(id: String): List<File> {
         if (!id.matches(Regex("[a-fA-F0-9-]{1,128}"))) return emptyList()
-        return listOf(File(current, "$id-detail.jpg"), File(saved, "$id.jpg"), File(current, "$id-grid.jpg"), File(legacy, "$id.jpg"))
-            .filter { it.isFile && it.length() in 1..MAX_PREVIEW_BYTES }
+        return previewFiles(id).filter { it.isFile && it.length() in 1..MAX_PREVIEW_BYTES }
+    }
+
+    private fun previewFiles(id: String): List<File> = listOf("jpg", "heic").flatMap { extension ->
+        listOf(File(current, "$id-detail.$extension"), File(saved, "$id.$extension"), File(current, "$id-grid.$extension"))
     }
 
     fun attachCachedPreview(asset: PhotoAsset): PhotoAsset {
         if (asset.format != MediaFormat.RAW || asset.downloadState != DownloadState.DOWNLOADED) return asset
+        // Startup only restores an address; visible previews compare actual dimensions in PhotoPreviewLoader.
         val files = candidates(asset.id)
         val available = files.find { Uri.fromFile(it).toString() == asset.previewUri } ?: files.firstOrNull() ?: return asset
         return withPreview(asset, available)
@@ -33,24 +36,15 @@ internal class PhotoPreviewStore(context: Context) {
     private fun recoverLocked(asset: PhotoAsset): PhotoAsset {
         if (asset.format != MediaFormat.RAW || asset.downloadState != DownloadState.DOWNLOADED) return asset
         if (!asset.id.matches(Regex("[a-fA-F0-9-]{1,128}"))) return asset
-        val target = File(saved, "${asset.id}.jpg")
-        if (asset.previewUri == Uri.fromFile(target).toString() && target.isFile && target.length() in 1..MAX_PREVIEW_BYTES &&
-            candidates(asset.id).none { it != target && it.lastModified() > target.lastModified() }) return asset
-        val available = candidates(asset.id).mapNotNull { file ->
-            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(file.absolutePath, options)
-            if (options.outWidth <= 0 || options.outHeight <= 0) null else file to options.outWidth.toLong() * options.outHeight
-        }
-        val best = available.maxByOrNull { it.second }?.first ?: return asset
+        val files = candidates(asset.id)
+        val archived = files.find { it.parentFile == saved && asset.previewUri == Uri.fromFile(it).toString() }
+        if (archived != null && files.none { it.lastModified() > archived.lastModified() }) return asset
+        val best = bestPreviewFile(files)?.first ?: return asset
+        val target = File(saved, "${asset.id}.${best.extension}")
         val file = if (best == target) target else {
             try {
                 saved.mkdirs()
-                val atomic = AtomicFile(target)
-                val output = atomic.startWrite()
-                try {
-                    best.inputStream().use { it.copyTo(output) }
-                    atomic.finishWrite(output)
-                } catch (error: Exception) { atomic.failWrite(output); throw error }
+                target.writeAtomically { output -> best.inputStream().use { it.copyTo(output) } }
                 target
             } catch (_: Exception) { best }
         }
@@ -62,8 +56,7 @@ internal class PhotoPreviewStore(context: Context) {
 
     fun remove(id: String) = synchronized(archiveLock) {
         if (!id.matches(Regex("[a-fA-F0-9-]{1,128}"))) return@synchronized
-        listOf(File(saved, "$id.jpg"), File(current, "$id-detail.jpg"), File(current, "$id-grid.jpg"), File(legacy, "$id.jpg"))
-            .forEach { AtomicFile(it).delete() }
+        previewFiles(id).forEach { AtomicFile(it).delete() }
     }
 
     companion object {

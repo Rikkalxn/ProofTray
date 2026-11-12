@@ -24,12 +24,12 @@ class BluetoothClientNameTest {
         val text = bytes.toString(Charsets.UTF_8).substringBefore('\u0000')
         assertFalse(text.contains('\ufffd'))
         assertTrue(text.all { it in '!'..'~' })
-        assertEquals("Android_OpenBridge", text)
+        assertEquals("Android_ProofTray", text)
         assertEquals(0, bytes.last().toInt())
     }
 
     @Test fun blankOrControlOnlyNamesUseAVisibleFallback() {
         val text = bluetoothClientName("\u0000\n\r").toString(Charsets.UTF_8).substringBefore('\u0000')
-        assertEquals("Android_OpenBridge", text)
+        assertEquals("Android_ProofTray", text)
     }
 }

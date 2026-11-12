@@ -10,7 +10,7 @@ object CatalogEngine {
     private const val MAX_ASSETS = 500_000
     private val loadNative by lazy { System.loadLibrary("openbridge") }
 
-    fun query(assets: List<PhotoAsset>, filter: FilterSpec, collapseBursts: Boolean = true): CatalogResult {
+    fun query(assets: List<PhotoAsset>, filter: FilterSpec, collapseStacks: Boolean = true): CatalogResult {
         require(assets.size <= MAX_ASSETS) { "照片数量超过单次目录查询上限" }
         if (assets.isEmpty()) return CatalogResult(emptyList(), 0, 0)
         loadNative
@@ -26,7 +26,7 @@ object CatalogEngine {
             text[textBase + 3] = asset.lens.lowercase(Locale.ROOT)
             text[textBase + 4] = asset.sourceId
             text[textBase + 5] = asset.folder
-            text[textBase + 6] = asset.burstId.orEmpty()
+            text[textBase + 6] = asset.stackId.orEmpty()
             val numberBase = index * INTEGER_STRIDE
             integers[numberBase] = asset.format.ordinal.toLong()
             integers[numberBase + 1] = asset.sizeBytes.takeIf { it > 0 } ?: Long.MIN_VALUE
@@ -62,7 +62,7 @@ object CatalogEngine {
         )
         val filterTags = filter.tags.map { it.trim().lowercase(Locale.ROOT) }.filter { it.isNotEmpty() }.distinct().toTypedArray()
         val encoded = queryNative(
-            text, integers, decimals, tags.toTypedArray(), filterText, filterIntegers, filterDecimals, filterTags, collapseBursts
+            text, integers, decimals, tags.toTypedArray(), filterText, filterIntegers, filterDecimals, filterTags, collapseStacks
         )
         return decode(assets, encoded)
     }
@@ -100,12 +100,12 @@ object CatalogEngine {
         return CatalogResult(groups, matchedCount, pendingCount)
     }
 
-    // Wire version 1: text[id,name,camera,lens,source,folder,burst]; integers
+    // Wire version 1: text[id,name,camera,lens,source,folder,manualStack]; integers
     // [format,size,time,width,height,ISO,rating,pick,download,tagOffset,tagCount,metadataComplete];
     // decimals[aperture,exposureSeconds,focalLength]. Long.MIN_VALUE / NaN mean unknown.
     // Result: [version,matched,pending,groupCount, {anchor,inferred,count,memberIndices...}...].
     private external fun queryNative(
         text: Array<String>, integers: LongArray, decimals: DoubleArray, tags: Array<String>,
-        filterText: Array<String>, filterIntegers: LongArray, filterDecimals: DoubleArray, filterTags: Array<String>, collapseBursts: Boolean
+        filterText: Array<String>, filterIntegers: LongArray, filterDecimals: DoubleArray, filterTags: Array<String>, collapseStacks: Boolean
     ): IntArray
 }

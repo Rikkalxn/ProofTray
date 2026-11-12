@@ -1,13 +1,13 @@
 package org.openbridge.app.domain
 
-import java.security.MessageDigest
+import org.openbridge.app.util.sha256Hex
 
 enum class DownloadVariant { ORIGINAL, CAMERA_JPEG }
 enum class AutoDownloadKind { CAMERA_JPEG, JPEG, RAW, BOTH }
 
 fun representationKey(originalKey: String, variant: DownloadVariant): String {
     if (variant == DownloadVariant.ORIGINAL) return originalKey
-    return MessageDigest.getInstance("SHA-256").digest("$originalKey:camera-jpeg-v1".toByteArray()).joinToString("") { "%02x".format(it) }
+    return "$originalKey:camera-jpeg-v1".toByteArray().sha256Hex()
 }
 
 fun jpegRepresentationKey(asset: PhotoAsset): String =

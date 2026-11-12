@@ -71,11 +71,13 @@ class CameraLocationService : Service() {
         }
         scope.launch { controller.bleState.map { it.authenticated to it.locationRequested }.distinctUntilChanged().collect { wake.trySend(Unit) } }
         scope.launch { controller.state.map { it.connected }.distinctUntilChanged().collect { wake.trySend(Unit) } }
-        scope.launch { settings.state.map { it.locationSync to it.powerProfile }.distinctUntilChanged().collect { wake.trySend(Unit) } }
+        scope.launch {
+            settings.state.map { (it.locationSync && !it.sonySelected) to it.powerProfile }.distinctUntilChanged().collect { wake.trySend(Unit) }
+        }
         scope.launch {
             var positionSent = false
             var failures = 0
-            while (settings.state.value.locationSync) {
+            while (settings.state.value.locationSync && !settings.state.value.sonySelected) {
                 if (!controller.canSyncLocation()) {
                     report("等待支持位置同步的相机连接")
                     wake.receive()
@@ -159,7 +161,8 @@ class CameraLocationService : Service() {
 
     private fun notification(message: String): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        return Notification.Builder(this, "location").setSmallIcon(R.drawable.ic_notification).setContentTitle("OpenBridge 位置同步")
+        return Notification.Builder(this, "location").setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("${getString(R.string.app_name)} 位置同步")
             .setContentText(message).setContentIntent(open).setOnlyAlertOnce(true).setOngoing(true).build()
     }
 

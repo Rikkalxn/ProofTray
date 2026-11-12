@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import org.openbridge.app.domain.DownloadState
 import org.openbridge.app.domain.MediaFormat
 import org.openbridge.app.domain.PhotoAsset
+import org.openbridge.app.domain.photoMimeType
 
 data class EditableCopy(val uri: Uri, val mimeType: String)
 
@@ -21,21 +22,16 @@ class ExternalPhotoEditor(context: Context) {
     private val resolver = context.applicationContext.contentResolver
 
     suspend fun prepare(asset: PhotoAsset): EditableCopy = withContext(Dispatchers.IO) {
-        require(asset.downloadState == DownloadState.DOWNLOADED) { "请先下载原片，再使用系统编辑器。" }
+        require(asset.downloadState == DownloadState.DOWNLOADED) { "请先导入原片，再使用系统编辑器。" }
         val source = Uri.parse(asset.uri)
         val extension = asset.name.substringAfterLast('.', "jpg").lowercase().filter(Char::isLetterOrDigit).take(12)
-        val mime = when (extension) {
-            "nef" -> "image/x-nikon-nef"
-            "nrw" -> "image/x-nikon-nrw"
-            "dng" -> "image/x-adobe-dng"
-            else -> resolver.getType(source)?.takeIf { it.startsWith("image/") } ?: when (asset.format) {
-                MediaFormat.PNG -> "image/png"
-                MediaFormat.HEIF -> "image/heic"
-                MediaFormat.TIFF -> "image/tiff"
-                MediaFormat.JPEG -> "image/jpeg"
-                MediaFormat.RAW -> "image/x-raw"
-                MediaFormat.OTHER -> error("无法确定文件的图片类型，请使用原文件导出")
-            }
+        val mime = photoMimeType(asset.name) ?: resolver.getType(source)?.takeIf { it.startsWith("image/") } ?: when (asset.format) {
+            MediaFormat.PNG -> "image/png"
+            MediaFormat.HEIF -> "image/heic"
+            MediaFormat.TIFF -> "image/tiff"
+            MediaFormat.JPEG -> "image/jpeg"
+            MediaFormat.RAW -> "image/x-raw"
+            MediaFormat.OTHER -> error("无法确定文件的图片类型，请使用原文件导出")
         }
         val raw = asset.format == MediaFormat.RAW
         val collection = if (raw) MediaStore.Downloads.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
@@ -44,7 +40,7 @@ class ExternalPhotoEditor(context: Context) {
             put(MediaStore.MediaColumns.DISPLAY_NAME, "${stem}_edit_${UUID.randomUUID().toString().take(8)}.$extension")
             put(MediaStore.MediaColumns.MIME_TYPE, mime)
             put(MediaStore.MediaColumns.RELATIVE_PATH,
-                if (raw) "${Environment.DIRECTORY_DOWNLOADS}/OpenBridge/Edits" else "${Environment.DIRECTORY_PICTURES}/OpenBridge/Edits")
+                if (raw) "${Environment.DIRECTORY_DOWNLOADS}/ProofTray/Edits" else "${Environment.DIRECTORY_PICTURES}/ProofTray/Edits")
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         val destination = resolver.insert(collection, values) ?: error("无法创建编辑副本")

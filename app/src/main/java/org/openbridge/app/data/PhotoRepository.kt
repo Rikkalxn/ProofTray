@@ -1,9 +1,11 @@
 package org.openbridge.app.data
 
 import android.content.Context
+import android.content.ContentUris
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.exifinterface.media.ExifInterface
 import java.time.LocalDateTime
@@ -24,14 +26,17 @@ import org.openbridge.app.domain.DownloadState
 import org.openbridge.app.domain.PhotoAsset
 import org.openbridge.app.domain.PickState
 import org.openbridge.app.domain.SavedFilter
+import org.openbridge.app.domain.isMediaItemUri
+import org.openbridge.app.domain.photoMediaFormat
+import org.openbridge.app.domain.resetImportHistory
 
 data class ImportReport(val importedCount: Int, val skippedCount: Int, val errors: List<String>, val refreshedCount: Int = 0)
 data class ImportListCleanup(val removedIds: Set<String>, val unusedPreviewIds: Set<String>)
 
-class PhotoRepository(context: Context) {
+class PhotoRepository private constructor(context: Context) {
     private val appContext = context.applicationContext
     private val resolver = appContext.contentResolver
-    private val database = CatalogDatabase(appContext)
+    private val database = CatalogDatabase.get(appContext)
     private val previews = PhotoPreviewStore(appContext)
     private val mutex = sharedMutex
 
@@ -43,9 +48,56 @@ class PhotoRepository(context: Context) {
     }
     suspend fun importedKeys(): Set<String> = withContext(Dispatchers.IO) { mutex.withLock { database.importHistory().keys } }
 
+    internal suspend fun assetForUri(uri: String): PhotoAsset? = withContext(Dispatchers.IO) {
+        mutex.withLock { database.assetForUri(uri) }
+    }
+
+    suspend fun importHistoryCount(): Long = withContext(Dispatchers.IO) { mutex.withLock { database.importHistoryCount() } }
+
+    internal suspend fun clearImportHistory(importsActive: () -> Boolean) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val assets = database.loadAssets()
+            val updated = resetImportHistory(assets, importsActive())
+            val db = database.writableDatabase
+            db.beginTransaction()
+            try {
+                database.clearImportHistory(db)
+                assets.zip(updated).forEach { (previous, next) ->
+                    if (next != previous) database.updateAssetPayload(next, db)
+                }
+                db.setTransactionSuccessful()
+            } finally { db.endTransaction() }
+        }
+    }
+
+    internal suspend fun recoverSourceOrientation(asset: PhotoAsset): PhotoAsset = withContext(Dispatchers.IO) {
+        val stored = mutex.withLock { database.assetForId(asset.id) } ?: return@withContext asset
+        localRawUri(appContext, stored)?.let { localRawGeometry(appContext, it) }?.let { return@withContext it.applyTo(asset) }
+        val tag = stored.sourceOrientation ?: if (stored.downloadState == DownloadState.DOWNLOADED) runCatching {
+            resolver.openFileDescriptor(Uri.parse(stored.uri), "r")?.use { ExifInterface(it.fileDescriptor).orientationTag() }
+        }.getOrNull() else null
+        if (tag == null) asset else asset.copy(sourceOrientation = tag, width = stored.width ?: asset.width, height = stored.height ?: asset.height)
+    }
+
+    internal suspend fun updateSourceGeometry(source: PhotoAsset): PhotoAsset? = withContext(Dispatchers.IO) {
+        if (source.format != MediaFormat.RAW || source.downloadState != DownloadState.DOWNLOADED) return@withContext null
+        mutex.withLock { database.updateSourceGeometry(source) }
+    }
+
+    suspend fun rememberExport(sourceId: String, uri: Uri, sourceSnapshot: PhotoAsset? = null) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            if (database.assetForUri(uri.toString()) != null) return@withLock
+            val parent = sourceSnapshot ?: database.assetForId(sourceId)
+            val asset = readAsset(uri).copy(derivedFromId = sourceId, cameraCaptureKey = parent?.cameraCaptureKey,
+                rating = parent?.rating ?: 0, pickState = parent?.pickState ?: PickState.UNMARKED, tags = parent?.tags.orEmpty(),
+                importedAtMillis = System.currentTimeMillis())
+            database.putAsset(asset)
+        }
+    }
+
     suspend fun readCameraDownload(asset: PhotoAsset, uri: Uri): PhotoAsset = withContext(Dispatchers.IO) {
         val parsed = readAsset(uri)
-        previews.recover(parsed.copy(id = asset.id, sourceId = asset.sourceId, folder = asset.folder,
+        previews.recover(parsed.copy(id = asset.id, sourceId = asset.sourceId, folder = asset.folder, camera = parsed.camera.ifBlank { asset.camera },
             capturedAtMillis = asset.capturedAtMillis ?: parsed.capturedAtMillis, downloadState = DownloadState.DOWNLOADED,
             cameraFileKey = asset.cameraFileKey, inImportList = asset.inImportList, previewUri = asset.previewUri,
             previewRevision = asset.previewRevision,
@@ -63,7 +115,8 @@ class PhotoRepository(context: Context) {
                     val merged = mergeCameraAsset(previous, incoming, resetQueued).let { asset ->
                         asset.copy(importedAtMillis = asset.importedAtMillis ?: asset.cameraFileKey?.let(history::get))
                     }
-                    if (merged.downloadState == DownloadState.DOWNLOADED) {
+                    // Only a newly received file records an import; browsing existing local rows must not recreate a cleared ledger.
+                    if (incoming.downloadState == DownloadState.DOWNLOADED) {
                         merged.cameraFileKey?.let { database.rememberImport(it, merged.importedAtMillis ?: System.currentTimeMillis(), db) }
                     }
                     database.putAsset(merged, db)
@@ -73,19 +126,6 @@ class PhotoRepository(context: Context) {
         }
     }
 
-    private fun mergeCameraAsset(previous: PhotoAsset?, incoming: PhotoAsset, resetQueued: Boolean): PhotoAsset {
-        if (previous == null) return incoming
-        if (previous.downloadState == DownloadState.DOWNLOADED && incoming.downloadState != DownloadState.DOWNLOADED) {
-            return previous.copy(inImportList = incoming.inImportList, previewUri = incoming.previewUri ?: previous.previewUri,
-                previewRevision = incoming.previewRevision ?: previous.previewRevision)
-        }
-        val queued = previous.downloadState == DownloadState.QUEUED && incoming.downloadState == DownloadState.REMOTE && !resetQueued
-        return incoming.copy(rating = previous.rating, pickState = previous.pickState, tags = previous.tags,
-            downloadState = if (queued) DownloadState.QUEUED else incoming.downloadState,
-            hiddenFromLibrary = previous.hiddenFromLibrary && incoming.downloadState != DownloadState.DOWNLOADED,
-            previewUri = incoming.previewUri ?: previous.previewUri, previewRevision = incoming.previewRevision ?: previous.previewRevision)
-    }
-
     suspend fun setLibraryVisibility(ids: Set<String>, visible: Boolean) = withContext(Dispatchers.IO) {
         mutex.withLock {
             val db = database.writableDatabase
@@ -93,6 +133,49 @@ class PhotoRepository(context: Context) {
             try {
                 database.loadAssets().filter { it.id in ids && it.downloadState == DownloadState.DOWNLOADED }.forEach {
                     database.putAsset(it.copy(hiddenFromLibrary = !visible), db)
+                }
+                db.setTransactionSuccessful()
+            } finally { db.endTransaction() }
+        }
+    }
+
+    suspend fun promoteExports(ids: Set<String>) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val db = database.writableDatabase
+            db.beginTransaction()
+            try {
+                for (id in ids) {
+                    val asset = database.assetForId(id) ?: continue
+                    if (asset.derivedFromId != null && asset.downloadState == DownloadState.DOWNLOADED && !asset.hiddenFromLibrary) {
+                        database.putAsset(asset.copy(derivedFromId = null), db)
+                    }
+                }
+                db.setTransactionSuccessful()
+            } finally { db.endTransaction() }
+        }
+    }
+
+    suspend fun setManualStack(ids: Set<String>, group: Boolean) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val assets = database.loadAssets()
+            val selected = assets.filter { it.id in ids }
+            if (group) require(selected.size >= 2) { "至少选择两张照片再分组" }
+            val touched = selected.mapNotNull { it.stackId }.toSet()
+            val stack = if (group) UUID.randomUUID().toString() else null
+            val changed = assets.map { asset ->
+                when {
+                    group && asset.id in ids -> asset.copy(stackId = stack)
+                    !group && asset.stackId != null && asset.stackId in touched -> asset.copy(stackId = null)
+                    else -> asset
+                }
+            }
+            val sizes = changed.mapNotNull { it.stackId }.groupingBy { it }.eachCount()
+            val db = database.writableDatabase
+            db.beginTransaction()
+            try {
+                changed.zip(assets).forEach { (updated, original) ->
+                    val normalized = if (updated.stackId != null && sizes[updated.stackId] == 1) updated.copy(stackId = null) else updated
+                    if (normalized.stackId != original.stackId) database.putAsset(normalized, db)
                 }
                 db.setTransactionSuccessful()
             } finally { db.endTransaction() }
@@ -151,13 +234,14 @@ class PhotoRepository(context: Context) {
             try {
                 val asset = readAsset(uri)
                 val (stored, wasRefresh) = mutex.withLock {
-                    val previous = database.assetForUri(uri.toString())
+                    val previous = existingImport(uri)
                     val updated = if (previous == null) asset else asset.copy(
-                        id = previous.id, rating = previous.rating, pickState = previous.pickState, tags = previous.tags,
+                        id = previous.id, uri = if (previous.uri == asset.uri || canRead(previous.uri)) previous.uri else asset.uri,
+                        rating = previous.rating, pickState = previous.pickState, tags = previous.tags,
                         sourceId = previous.sourceId, folder = previous.folder, cameraFileKey = previous.cameraFileKey,
                         inImportList = previous.inImportList, previewUri = previous.previewUri, importedAtMillis = previous.importedAtMillis,
                         jpegCopyImportedAtMillis = previous.jpegCopyImportedAtMillis, derivedFromId = previous.derivedFromId,
-                        cameraCaptureKey = previous.cameraCaptureKey
+                        cameraCaptureKey = previous.cameraCaptureKey, stackId = previous.stackId
                     )
                     database.putAsset(updated)
                     updated to (previous != null)
@@ -177,6 +261,33 @@ class PhotoRepository(context: Context) {
         }
         if (batch.isNotEmpty()) onBatch(batch.toList())
         ImportReport(imported, skipped, errors, refreshed)
+    }
+
+    private fun canRead(value: String) = runCatching { resolver.openFileDescriptor(Uri.parse(value), "r")?.use { true } == true }.getOrDefault(false)
+
+    /** The picker can return a document URI for an existing MediaStore export, or a document URI without its tree grant. */
+    private fun existingImport(uri: Uri): PhotoAsset? {
+        database.assetForUri(uri.toString())?.let { return it }
+        val media = if (DocumentsContract.isDocumentUri(appContext, uri)) {
+            val document = DocumentsContract.buildDocumentUri(uri.authority, DocumentsContract.getDocumentId(uri))
+            database.assetForDocument(document)?.let { return it }
+            runCatching { MediaStore.getMediaUri(appContext, uri) }.getOrNull() ?: return null
+        } else uri
+        if (!isMediaItemUri(media.toString())) return null
+        database.assetForUri(media.toString())?.let { return it }
+        val id = ContentUris.parseId(media)
+        val mediaVolume = MediaStore.getVolumeName(media)
+        val collections = listOf(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, MediaStore.Downloads.EXTERNAL_CONTENT_URI)
+        for (collection in collections) {
+            val alias = ContentUris.withAppendedId(collection, id)
+            val known = database.assetForUri(alias.toString()) ?: continue
+            if (mediaVolume == MediaStore.getVolumeName(alias)) return known
+            val volume = runCatching { resolver.query(alias, arrayOf(MediaStore.MediaColumns.VOLUME_NAME), null, null, null)?.use {
+                if (it.moveToFirst()) it.getString(0) else null
+            } }.getOrNull()
+            if (volume == mediaVolume) return known
+        }
+        return null
     }
 
     suspend fun updateMarks(ids: Set<String>, rating: Int? = null, pickState: PickState? = null, tags: Set<String>? = null) {
@@ -223,7 +334,7 @@ class PhotoRepository(context: Context) {
             }
         }
         require(name.isNotBlank()) { "文件提供方没有返回文件名" }
-        val format = formatFor(name, resolver.getType(uri))
+        val format = photoMediaFormat(name, resolver.getType(uri))
         require(format != MediaFormat.OTHER) { "尚不支持此文件格式：$name" }
         // Verify access even when the metadata decoder does not recognize this RAW format.
         resolver.openInputStream(uri)?.use { check(it.read() != -1) { "文件为空" } } ?: error("无法打开文件")
@@ -240,7 +351,7 @@ class PhotoRepository(context: Context) {
             width = bounds.outWidth.takeIf { it > 0 }
             height = bounds.outHeight.takeIf { it > 0 }
         }
-        val orientation = exif?.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        val orientation = exif?.orientationTag()
         if (orientation in setOf(5, 6, 7, 8)) {
             val originalWidth = width
             width = height
@@ -256,7 +367,7 @@ class PhotoRepository(context: Context) {
         val folder = documentFolder(uri)
         return PhotoAsset(
             id = UUID.randomUUID().toString(), uri = uri.toString(), name = name, format = format, sizeBytes = size,
-            capturedAtMillis = exif?.captureTime(), width = width, height = height, camera = camera,
+            capturedAtMillis = exif?.captureTime(), width = width, height = height, sourceOrientation = orientation, camera = camera,
             lens = exif?.getAttribute(ExifInterface.TAG_LENS_MODEL)?.trim().orEmpty(),
             iso = exif?.positiveInt(ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY), aperture = exif?.positiveDouble(ExifInterface.TAG_F_NUMBER),
             exposureSeconds = exif?.positiveDouble(ExifInterface.TAG_EXPOSURE_TIME),
@@ -271,23 +382,6 @@ class PhotoRepository(context: Context) {
         // Opaque IDs such as "image:123" cannot establish a common parent directory.
         val slash = documentId.lastIndexOf('/')
         return if (slash > 0) documentId.substring(0, slash) else ""
-    }
-
-    private fun formatFor(name: String, mime: String?): MediaFormat {
-        return when (name.substringAfterLast('.', "").lowercase(Locale.ROOT)) {
-            "jpg", "jpeg", "jpe" -> MediaFormat.JPEG
-            "nef", "nrw", "dng", "cr2", "cr3", "arw", "raf", "rw2", "orf", "pef", "srw" -> MediaFormat.RAW
-            "png" -> MediaFormat.PNG
-            "heic", "heif", "hif" -> MediaFormat.HEIF
-            "tif", "tiff" -> MediaFormat.TIFF
-            else -> when (mime?.lowercase(Locale.ROOT)) {
-                "image/jpeg" -> MediaFormat.JPEG
-                "image/png" -> MediaFormat.PNG
-                "image/heic", "image/heif" -> MediaFormat.HEIF
-                "image/tiff" -> MediaFormat.TIFF
-                else -> MediaFormat.OTHER
-            }
-        }
     }
 
     private fun ExifInterface.positiveInt(tag: String): Int? = getAttributeInt(tag, -1).takeIf { it > 0 }
@@ -305,7 +399,11 @@ class PhotoRepository(context: Context) {
         }.getOrNull()
     }
 
-    private companion object {
-        val sharedMutex = Mutex()
+    companion object {
+        private val sharedMutex = Mutex()
+        @Volatile private var instance: PhotoRepository? = null
+        fun get(context: Context): PhotoRepository = instance ?: synchronized(this) {
+            instance ?: PhotoRepository(context.applicationContext).also { instance = it }
+        }
     }
 }

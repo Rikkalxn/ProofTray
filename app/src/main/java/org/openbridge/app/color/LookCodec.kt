@@ -2,13 +2,35 @@ package org.openbridge.app.color
 
 import org.json.JSONObject
 import org.openbridge.app.domain.ColorLookSettings
+import org.openbridge.app.domain.LutRange
+import org.openbridge.app.domain.LutUsage
 
 object LookCodec {
+    const val PRESET_SCHEMA = "org.openbridge.look"
+    const val PRESET_VERSION = 1
+
+    fun encodeUsage(usage: LutUsage) = JSONObject().apply {
+        put("input", usage.inputName); put("output", usage.outputName)
+        put("inputRange", usage.inputRange.name); put("outputRange", usage.outputRange.name)
+    }
+
+    fun decodeUsage(json: JSONObject) = LutUsage(json.getString("input"), json.getString("output"),
+        LutRange.valueOf(json.getString("inputRange")), LutRange.valueOf(json.getString("outputRange"))).also {
+        if (it.unavailableReason == null) it.validateForPhoto()
+    }
+
     fun encode(look: ColorLookSettings): JSONObject = JSONObject().apply {
         put("name", look.name); put("lutId", look.lutId ?: JSONObject.NULL); put("strength", look.strength.toDouble())
         put("exposure", look.exposure.toDouble()); put("contrast", look.contrast.toDouble())
         put("saturation", look.saturation.toDouble()); put("warmth", look.warmth.toDouble())
+        put("lutUsage", encodeUsage(look.usage))
+        if (look.usesLog || look.usage.unavailableReason != null) put("logGainEv", look.logGainEv.toDouble())
     }
+
+    fun presetEnvelope(name: String, look: ColorLookSettings): JSONObject = JSONObject().apply {
+        put("schema", PRESET_SCHEMA); put("version", PRESET_VERSION); put("name", name); put("look", encode(look))
+    }
+
     fun decode(json: JSONObject): ColorLookSettings {
         fun number(key: String, fallback: Float): Float {
             if (!json.has(key)) return fallback
@@ -19,8 +41,9 @@ object LookCodec {
         return ColorLookSettings(
             name = json.optString("name", "自定义").take(128), lutId = if (json.isNull("lutId")) null else json.getString("lutId"),
             strength = number("strength", 1f), exposure = number("exposure", 0f), contrast = number("contrast", 0f),
-            saturation = number("saturation", 1f), warmth = number("warmth", 0f)
-        ).also { it.validate() }
+            saturation = number("saturation", 1f), warmth = number("warmth", 0f),
+            usage = decodeUsage(json.getJSONObject("lutUsage")), logGainEv = number(if (json.has("logGainEv")) "logGainEv" else "nlogGainEv", 0f)
+        ).also { it.validateParameters() }
     }
 
     fun checkedJson(text: String): JSONObject {

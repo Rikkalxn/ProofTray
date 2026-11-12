@@ -97,7 +97,7 @@ void PairingUsesFullCatalogAndIdentity() {
   auto jpeg = Photo("jpeg", "DSC_1000.JPG", 1000);
   CatalogFilter filter;
   auto result = QueryCatalog({raw, jpeg}, filter, false);
-  Expect(result.groups.size() == 1 && result.groups[0].members.size() == 2, "RAW/JPEG pairing must survive disabled burst folding");
+  Expect(result.groups.size() == 2, "RAW/JPEG representations must stay separate until the user groups them");
   filter.paired_raw_jpeg_only = true;
   filter.format_mask = 1u << static_cast<unsigned>(MediaFormat::kRaw);
   result = QueryCatalog({raw, jpeg}, filter, false);
@@ -109,21 +109,33 @@ void PairingUsesFullCatalogAndIdentity() {
   Expect(result.pending_metadata_count == 1, "Unknown pair identity must not be treated as known unpaired");
 }
 
-void BurstInferenceAndStableOrdering() {
+void ManualStacksAndStableOrdering() {
   auto first = Photo("a", "DSC_1000.JPG", 1000);
   auto second = Photo("b", "DSC_1001.JPG", 2000);
   auto unknown = Photo("c", "DSC_1002.JPG", 3000);
   unknown.captured_at_ms.reset();
   auto result = QueryCatalog({unknown, second, first}, {}, true);
-  Expect(result.groups.size() == 2 && result.groups[0].inferred_burst, "Adjacent known captures should form an explicitly inferred burst");
-  Expect(result.groups[0].members[0] == 1 && result.groups[0].members[1] == 2, "Newest sorting must apply inside a burst");
-  Expect(result.groups[1].members[0] == 0, "Unknown timestamp must remain separate and sort last");
-  first.burst_id = "burst-a";
-  second.burst_id = "burst-b";
-  Expect(QueryCatalog({first, second}, {}, true).groups.size() == 2, "Explicit burst IDs must prevent heuristic merging");
-  second.burst_id = first.burst_id;
+  Expect(result.groups.size() == 3, "Close capture times must not create a group");
+  Expect(result.groups[0].members[0] == 1 && result.groups[1].members[0] == 2, "Newest sorting must remain stable");
+  Expect(result.groups[2].members[0] == 0, "Unknown timestamp must sort last");
+  first.stack_id = "stack-a";
+  second.stack_id = "stack-b";
+  Expect(QueryCatalog({first, second}, {}, true).groups.size() == 2, "Different user groups must remain separate");
+  second.stack_id = first.stack_id;
   result = QueryCatalog({first, second}, {}, true);
-  Expect(result.groups.size() == 1 && !result.groups[0].inferred_burst, "Explicit burst IDs must not be marked inferred");
+  Expect(result.groups.size() == 1 && !result.groups[0].inferred_burst, "Only explicit user groups may collapse");
+  Expect(QueryCatalog({first, second}, {}, false).groups.size() == 2, "Disabling folding must reveal every member");
+  second.camera.clear();
+  second.source_id = "another-source";
+  second.captured_at_ms.reset();
+  Expect(QueryCatalog({first, second}, {}, true).groups.size() == 1, "A manual group does not require matching camera metadata");
+  first.stack_id.clear();
+  second.stack_id.clear();
+  first.name = "DSC_1000_OpenBridge_2M.jpg";
+  second.name = "DSC_1000.NEF";
+  second.format = MediaFormat::kRaw;
+  second.captured_at_ms = first.captured_at_ms;
+  Expect(QueryCatalog({first, second}, {}, true).groups.size() == 2, "BLE copies and later RAW imports must not become inferred bursts");
 }
 
 void InvalidInputsAreRejected() {
@@ -154,7 +166,7 @@ int main() {
     CombinedRangesAndTags();
     FilenameSearchDoesNotDependOnExif();
     PairingUsesFullCatalogAndIdentity();
-    BurstInferenceAndStableOrdering();
+    ManualStacksAndStableOrdering();
     InvalidInputsAreRejected();
     std::cout << "Catalog tests passed\n";
     return 0;

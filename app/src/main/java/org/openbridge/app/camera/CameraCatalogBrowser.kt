@@ -2,150 +2,106 @@ package org.openbridge.app.camera
 
 import android.content.Context
 import java.util.concurrent.ConcurrentHashMap
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.openbridge.app.data.PhotoRepository
-import org.openbridge.app.domain.PhotoAsset
 
-/** Enumerates handles once, then reads a bounded batch of ObjectInfo records on demand. */
+/** Binds the cancellable catalog reader to one live camera connection, its preview cache and the local database. */
 internal class CameraCatalogBrowser(
-    context: Context, private val scope: CoroutineScope, private val operations: Mutex, private val session: () -> CameraBrowseSession?,
-    private val progress: (BrowseProgress) -> Unit, private val changed: suspend () -> Unit
+    context: Context, scope: CoroutineScope, private val operations: Mutex, private val session: () -> CameraBrowseSession?,
+    progress: (BrowseProgress) -> Unit, private val changed: suspend () -> Unit
 ) {
     val photos = ConcurrentHashMap<String, RemotePhoto>()
-    private val repository = PhotoRepository(context)
-    private val previews = CameraPreviewCache(context, scope, operations, session) { photo ->
-        photos[photo.asset.id] = photo
-        repository.mergeCameraAssets(listOf(photo.asset))
+    private val repository = PhotoRepository.get(context)
+    private val writes = Mutex()
+    private val previews = CameraPreviewCache(context, repository, scope, operations, session) { photo ->
+        writes.withLock {
+            repository.mergeCameraAssets(listOf(photo.asset))
+            photos[photo.asset.id] = photo
+        }
         changed()
     }
-    private var job: Job? = null
-    private var handles = emptyList<Long>()
-    private var cursor = 0
-    private var generation = -1
+    private val reader = CatalogBatchReader(scope, ::source, progress)
     @Volatile private var clearing = false
-    private val loadedIds = linkedSetOf<String>()
 
     suspend fun resetSession() {
-        job?.cancelAndJoin()
+        reader.discard().join()
         previews.stopAndJoin()
         photos.clear()
-        handles = emptyList()
-        cursor = 0
-        generation = -1
-        loadedIds.clear()
     }
 
-    fun refresh(batchSize: Int) = readBatch(batchSize, reset = true)
-    fun loadMore(batchSize: Int) = readBatch(batchSize, reset = false)
+    fun refresh(size: Int?, direction: CatalogDirection, day: SonyCaptureDay? = null, sortChanged: Boolean = false) {
+        reader.start(size, direction, reset = true, day = day, sortChanged = sortChanged)
+    }
+
+    fun loadMore(size: Int?, direction: CatalogDirection, autoReadId: Long? = null) {
+        reader.start(size, direction, reset = false, autoReadId = autoReadId)
+    }
+
+    fun stopReading() { reader.pause() }
     fun requestPreview(id: String, detailed: Boolean): () -> Unit = photos[id]?.let { previews.request(it, detailed) } ?: {}
 
-    @Synchronized
-    private fun readBatch(batchSize: Int, reset: Boolean) {
-        require(batchSize in setOf(25, 50, 100, 200))
-        if (clearing || job?.isActive == true) return
-        val connection = session() ?: return
-        job = scope.launch {
-            try {
-                val restarting = reset || generation != connection.generation
-                if (restarting) { loadedIds.clear(); handles = emptyList(); cursor = 0; generation = -1 }
-                report(connection.generation, busy = true)
-                if (restarting) enumerate(connection)
-                val end = minOf(cursor + batchSize, handles.size)
-                val batch = mutableListOf<PhotoAsset>()
-                var position = cursor
-                while (position < end) {
-                    currentCoroutineContext().ensureActive()
-                    requireSession(connection)
-                    val handle = handles[position]
-                    try {
-                        val info = operations.withLock { requireSession(connection); connection.link.objectInfo(handle) }
-                        currentCoroutineContext().ensureActive()
-                        requireSession(connection)
-                        cameraPhoto(info, handle, connection, previews::cachedUri)?.let { photo ->
-                            photos[photo.asset.id] = photo
-                            batch += photo.asset
-                        }
-                    } catch (error: PtpResponseException) {
-                        if (error.response != 0x2009) throw error
-                    }
-                    position++
-                    if (batch.size >= 8 || position == end) {
-                        publish(batch, connection)
-                        loadedIds.addAll(batch.map { it.id })
-                        cursor = position
-                        batch.clear()
-                        report(connection.generation, busy = true)
-                    }
-                }
-                report(connection.generation, busy = false)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                if (session()?.generation == connection.generation) {
-                    report(connection.generation, busy = false, message = error.message)
-                }
-            }
-        }
+    private fun source(): CatalogReadSource? {
+        if (clearing) return null
+        val connection = session() ?: return null
+        return CatalogReadSource(connection.generation, { current(connection) }, { order, day -> enumerate(connection, order, day) },
+            { handle -> readPhoto(connection, handle) }, { batch -> publish(connection, batch) })
     }
 
-    private suspend fun enumerate(connection: CameraBrowseSession) {
-        val storageIds = operations.withLock { requireSession(connection); connection.link.storageIds() }
-        val discovered = mutableListOf<Long>()
-        for (storage in storageIds) {
+    private suspend fun enumerate(connection: CameraBrowseSession, direction: CatalogDirection, day: SonyCaptureDay?): CatalogDirectory {
+        val sony = operations.withLock { requireSession(connection); connection.link.sonyCatalogCursor(direction = direction, startAt = day) }
+        if (sony != null) return CatalogDirectory(dates = sony.dates, morePages = { sony.hasMore }) {
+            operations.withLock { requireSession(connection); connection.link.nextSonyPage(sony) }
+        }
+        check(day == null) { "这台相机的目录不支持按日期跳转" }
+        val storages = operations.withLock { requireSession(connection); connection.link.storageIds() }
+        val handles = linkedSetOf<Long>()
+        for (storage in storages) {
+            currentCoroutineContext().ensureActive()
             val ids = operations.withLock { requireSession(connection); connection.link.objectHandles(storage) }
-            // Handle order is an enumeration hint, not a promise that these are the newest photos on the whole card.
-            discovered.addAll(ids.reversedArray().toList())
+            handles.addAll(orderedMtpHandles(ids, direction))
         }
         requireSession(connection)
-        handles = discovered.distinct()
-        cursor = 0
-        generation = connection.generation
+        return CatalogDirectory(handles.toList())
     }
 
-    private suspend fun publish(batch: List<PhotoAsset>, connection: CameraBrowseSession) {
-        if (batch.isEmpty()) return
+    private suspend fun readPhoto(connection: CameraBrowseSession, handle: Long): RemotePhoto? {
+        val info = try { operations.withLock { requireSession(connection); connection.link.objectInfo(handle) } }
+        catch (error: PtpResponseException) { if (error.response == 0x2009) return null else throw error }
         requireSession(connection)
-        repository.mergeCameraAssets(batch.toList())
+        return cameraPhoto(info, handle, connection) { id -> photos[id]?.asset?.previewUri ?: previews.cachedUri(id) }
+    }
+
+    private suspend fun publish(connection: CameraBrowseSession, batch: List<RemotePhoto>) {
+        requireSession(connection)
+        // A re-sort can encounter a thumbnail with richer EXIF that was published during this session.
+        writes.withLock {
+            val verified = batch.map { photo -> photos[photo.asset.id]?.copy(handle = photo.handle, storage = photo.storage) ?: photo }
+            repository.mergeCameraAssets(verified.map { it.asset })
+            for (photo in verified) photos[photo.asset.id] = photo
+        }
         changed()
     }
 
-    private fun requireSession(connection: CameraBrowseSession) {
-        check(session()?.generation == connection.generation && connection.link.connected) { "相机会话已更换或断开" }
-    }
+    private fun current(connection: CameraBrowseSession) = session()?.generation == connection.generation && connection.link.connected
+    private fun requireSession(connection: CameraBrowseSession) = check(current(connection)) { "相机会话已更换或断开" }
 
-    private fun report(ownerGeneration: Int, busy: Boolean, message: String? = null) {
-        progress(BrowseProgress(ownerGeneration, cursor, handles.size, busy, cursor < handles.size, loadedIds.toSet(), message))
-    }
-
-    fun stop() { job?.cancel(); previews.stop() }
+    fun stop() { reader.discard(); previews.stop() }
 
     suspend fun clearImportList(source: String?, selectedIds: Set<String>? = null) {
-        val ownerGeneration = session()?.generation
+        val generation = session()?.generation
         clearing = true
         try {
-            job?.cancelAndJoin()
+            reader.pause().join()
             if (selectedIds == null) previews.stopAndJoin() else previews.stopAndJoin(selectedIds)
             val cleanup = repository.clearImportList(source, selectedIds)
             previews.clear(cleanup.unusedPreviewIds)
             cleanup.removedIds.forEach { photos.remove(it) }
-            if (selectedIds == null) {
-                handles = emptyList()
-                cursor = 0
-                generation = -1
-                loadedIds.clear()
-            } else loadedIds.removeAll(cleanup.removedIds)
+            if (generation != null) reader.removed(generation, if (selectedIds == null) null else cleanup.removedIds)
             changed()
-        } finally {
-            clearing = false
-            ownerGeneration?.let { report(it, busy = false) }
-        }
+        } finally { clearing = false }
     }
 }

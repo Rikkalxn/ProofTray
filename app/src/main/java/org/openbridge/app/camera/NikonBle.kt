@@ -2,11 +2,9 @@ package org.openbridge.app.camera
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
-import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.BluetoothGattDescriptor
-import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
@@ -14,8 +12,12 @@ import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.ParcelUuid
+import android.os.SystemClock
 import android.util.Log
 import java.security.SecureRandom
 import java.nio.ByteBuffer
@@ -30,29 +32,34 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.withTimeoutOrNull
-import org.openbridge.app.data.BluetoothRole
+import org.openbridge.app.data.AppSettingsRepository
+import org.openbridge.app.domain.BluetoothRole
 
-data class BleCamera(val address: String, val name: String, val classic: Boolean = false)
+data class BleCamera(val address: String, val name: String, val classic: Boolean = false, val advertisementFlags: Int? = null,
+                     val make: CameraMake = CameraMake.NIKON) {
+    val needsWakeConnection: Boolean get() = advertisementNeedsWake(advertisementFlags)
+}
 data class BleState(
     val cameras: List<BleCamera> = emptyList(), val scanning: Boolean = false,
     val authenticated: Boolean = false, val message: String = "蓝牙未连接", val connectedAddress: String = "",
-    val imageTransferRequested: Boolean = false, val locationRequested: Boolean = false, val serialNumber: String = "",
+    val imageTransferRequested: Boolean = false, val locationRequested: Boolean = false, val timeRequested: Boolean = false,
+    val serialNumber: String = "",
     val history: List<String> = emptyList(), val cameraName: String = "", val serverName: String = "",
     val pairingInProgress: Boolean = false, val systemPaired: Boolean = false, val classicAddress: String = "",
-    val wifiRequested: Boolean = false, val connectionRequested: Boolean = false, val clientName: String = ""
+    val wifiRequested: Boolean = false, val connectionRequested: Boolean = false, val clientName: String = "", val adapterEnabled: Boolean = true
 )
 
 private fun BleState.record(message: String): BleState = copy(message = message,
@@ -62,30 +69,63 @@ private fun BleState.record(message: String): BleState = copy(message = message,
 @Suppress("DEPRECATION")
 internal class NikonBle(private val context: Context, private val scope: CoroutineScope) {
     private val adapter = context.getSystemService(BluetoothManager::class.java).adapter
-    private val mutableState = MutableStateFlow(BleState())
+    private val mutableState = MutableStateFlow(BleState(adapterEnabled = runCatching { adapter?.isEnabled == true }.getOrDefault(true)))
     val state = mutableState.asStateFlow()
     private val mutableTransferRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val transferRequests = mutableTransferRequests.asSharedFlow()
-    @Volatile private var gatt: BluetoothGatt? = null
+    @Volatile private var session: NikonGattSession? = null
+    private var previousRelease: NikonGattSession? = null
+    private val settings = AppSettingsRepository.get(context)
+    private val timeRequests = Channel<Unit>(Channel.CONFLATED)
+    private var timeRequestRevision = 0L
+    @Volatile private var wakeGatt: BluetoothGatt? = null
+    private var wakeReady: CompletableDeferred<Unit>? = null
     private var connectionJob: Job? = null
     private var scanJob: Job? = null
     @Volatile private var scanGeneration = 0
     private var activeScan: ScanCallback? = null
     @Volatile private var generation = 0
-    @Volatile private var connectedToken: Int? = null
-    private val writes = Mutex()
-    @Volatile private var reply: CompletableDeferred<Int>? = null
-    @Volatile private var readReply: CompletableDeferred<ByteArray>? = null
     @Volatile private var featureFlags = 0
     @Volatile private var sessionKey: ByteArray? = null
+    @Volatile private var transportFailure: Pair<Int, BleTransportException>? = null
     private val discovered = ConcurrentHashMap<String, BluetoothDevice>()
-    private val serviceIds = listOf(uuid("de00"), uuid("de01"), UUID.fromString("6155bdb9-c76d-628d-5542-d43d01de0000"))
+    private val advertisements = ConcurrentHashMap<String, Pair<BleCamera, Long>>()
+    private val serviceIds = listOf(nikonUuid("de00"), nikonUuid("de01"), UUID.fromString("6155bdb9-c76d-628d-5542-d43d01de0000"))
+
+    private val adapterEvents = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                val enabled = runCatching { adapter?.isEnabled == true }.getOrDefault(false)
+                if (!enabled) disconnect()
+                mutableState.update { it.copy(adapterEnabled = enabled).record(if (enabled) "手机蓝牙已开启，等待连接" else "手机蓝牙已关闭") }
+            } else if (intent.action == BluetoothDevice.ACTION_BOND_STATE_CHANGED) {
+                val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
+                if (device.address != state.value.classicAddress ||
+                    !runCatching { device.bondState == BluetoothDevice.BOND_NONE }.getOrDefault(false)) return
+                disconnect()
+                mutableState.update { it.copy(systemPaired = false).record("相机的系统配对已移除，请重新配对") }
+            }
+        }
+    }
+
+    init {
+        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED).apply { addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED) }
+        if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(adapterEvents, filter, Context.RECEIVER_EXPORTED)
+        else context.registerReceiver(adapterEvents, filter)
+        scope.launch { settings.state.collect { timeRequests.trySend(Unit) } }
+        scope.launch { for (request in timeRequests) syncRequestedTime() }
+    }
+
+    private fun refreshAdapterState(): Boolean {
+        val enabled = adapter != null && adapter.isEnabled
+        mutableState.update { it.copy(adapterEnabled = enabled) }
+        return enabled
+    }
 
     private fun scanCallback(token: Int) = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             if (scanGeneration != token) return
-            val name = cameraBluetoothName(result.scanRecord?.deviceName).ifBlank { cameraBluetoothName(result.device.name) }
-            val item = BleCamera(result.device.address, name.ifBlank { "Nikon 相机" })
+            val item = advertisedCamera(result)
             if (discovered.size < 64 || discovered.containsKey(item.address)) discovered[item.address] = result.device
             mutableState.update { it.copy(cameras = (it.cameras.filterNot { old -> old.address == item.address } + item).takeLast(30)) }
         }
@@ -95,15 +135,20 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
     }
 
     @Synchronized
-    fun scan() {
+    fun scan(includeSony: Boolean = false) {
         runCatching {
-            check(adapter != null && adapter.isEnabled) { "请先打开手机蓝牙" }
+            check(refreshAdapterState()) { "请先打开手机蓝牙" }
             stopScan()
             discovered.clear()
+            advertisements.clear()
             val token = scanGeneration
             val callback = scanCallback(token).also { activeScan = it }
-            mutableState.update { it.copy(cameras = emptyList(), scanning = true, message = "请在相机上进入“连接至智能设备 / 开始配对”") }
-            val filters = serviceIds.map { ScanFilter.Builder().setServiceUuid(ParcelUuid(it)).build() }
+            mutableState.update { it.copy(cameras = emptyList(), scanning = true, message = "请在机身打开智能手机配对") }
+            val filters = serviceIds.map { ScanFilter.Builder().setServiceUuid(ParcelUuid(it)).build() }.toMutableList()
+            if (includeSony) {
+                filters += ScanFilter.Builder().setManufacturerData(SonyControlData.COMPANY_ID, byteArrayOf(3, 0)).build()
+                filters += ScanFilter.Builder().setServiceUuid(ParcelUuid(SonyControlData.pairingService)).build()
+            }
             val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
             adapter.bluetoothLeScanner.startScan(filters, settings, callback)
             scanJob = scope.launch {
@@ -113,16 +158,77 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
         }.onFailure { mutableState.update { state -> state.copy(scanning = false, message = it.message ?: "无法扫描蓝牙") } }
     }
 
+    private fun advertisedCamera(result: ScanResult): BleCamera {
+        val name = cameraBluetoothName(result.scanRecord?.deviceName).ifBlank { cameraBluetoothName(result.device.name) }
+        val sony = result.scanRecord?.getManufacturerSpecificData(SonyControlData.COMPANY_ID)
+        if ((sony != null && sony.size >= 2 && sony[0].toInt() == 3 && sony[1].toInt() == 0) ||
+            result.scanRecord?.serviceUuids?.contains(ParcelUuid(SonyControlData.pairingService)) == true) {
+            return BleCamera(result.device.address, name.ifBlank { "Sony α" }, make = CameraMake.SONY)
+        }
+        val manufacturer = result.scanRecord?.manufacturerSpecificData
+        val payloads = if (manufacturer == null) emptyList() else (0 until manufacturer.size()).map { manufacturer.valueAt(it) }
+        return BleCamera(result.device.address, name.ifBlank { "Nikon 相机" }, advertisementFlags = advertisementFlags(payloads)).also {
+            if (advertisements.size < 64 || advertisements.containsKey(it.address)) {
+                advertisements[it.address] = it to SystemClock.elapsedRealtime()
+            }
+        }
+    }
+
+    fun latestAdvertisement(address: String): BleCamera? = advertisements[address]?.takeIf {
+        SystemClock.elapsedRealtime() - it.second < 30000
+    }?.first
+
+    /** A short connection wakes a sleeping wireless module; authentication starts only after a fresh advertisement. */
+    suspend fun wakeSleepingCamera(address: String) {
+        val operation = currentCoroutineContext()
+        operation.ensureActive()
+        check(refreshAdapterState()) { "请先打开手机蓝牙" }
+        val (token, previous) = synchronized(this) { disconnect(); generation to previousRelease }
+        awaitPreviousRelease(previous)
+        val connected = CompletableDeferred<Unit>()
+        val callback = object : BluetoothGattCallback() {
+            override fun onConnectionStateChange(connection: BluetoothGatt, status: Int, newState: Int) {
+                if (generation != token) return
+                if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) connected.complete(Unit)
+                else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
+                    connected.completeExceptionally(BleTransportException(status, "休眠唤醒连接结束"))
+                }
+            }
+        }
+        val device = discovered[address] ?: adapter.getRemoteDevice(address)
+        val connection = synchronized(this) {
+            operation.ensureActive()
+            if (generation != token) throw CancellationException("唤醒操作已取消")
+            checkNotNull(device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)) { "无法建立休眠唤醒连接" }.also {
+                wakeGatt = it
+                wakeReady = connected
+            }
+        }
+        try {
+            withTimeout(10000) { connected.await() }
+            delay(50)
+            Log.i("OpenBridgeBluetooth", "sleep wake connection completed; rescan required")
+        } finally {
+            synchronized(this) {
+                if (wakeGatt === connection) {
+                    wakeGatt = null
+                    wakeReady = null
+                    closeWakeGatt(connection)
+                }
+            }
+        }
+    }
+
     suspend fun rediscover(names: Set<String>, previousAddress: String): BleCamera {
         require(names.any(String::isNotBlank)) { "尚未记录相机名称，请先搜索并选择相机" }
         scan()
-        if (state.value.scanning) connectionMessage("正在重新发现已关联相机，请保持相机开机")
+        if (state.value.scanning) connectionMessage("正在重新发现已关联相机；休眠唤醒可能需要片刻")
         try {
             val result = withTimeout(22000) {
                 state.first { value -> value.cameras.any { !it.classic && matchesCameraName(it.name, names) } || !value.scanning }
             }
             val camera = result.cameras.firstOrNull { !it.classic && matchesCameraName(it.name, names) }
-                ?: error("未发现已关联相机的 BLE 广播，请保持相机开机后重试")
+                ?: error("未发现已关联相机广播，请检查蓝牙与关机后发送设置，或开机后重试")
             Log.i("OpenBridgeBluetooth", "BLE rediscovery matched target; addressChanged=${camera.address != previousAddress}")
             return camera
         } finally { stopScan() }
@@ -130,25 +236,17 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
 
     /** Wait for a selected camera's pending-image advertisement without opening GATT or repeatedly waking the camera. */
     suspend fun awaitTransferAdvertisement(names: Set<String>): BleCamera {
-        check(adapter != null && adapter.isEnabled) { "请先打开手机蓝牙" }
+        check(refreshAdapterState()) { "请先打开手机蓝牙" }
         require(names.any(String::isNotBlank)) { "请先关联相机" }
         val scanner = adapter.bluetoothLeScanner ?: error("蓝牙扫描不可用")
         val pending = CompletableDeferred<BleCamera>()
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
-                val record = result.scanRecord ?: return
-                val name = cameraBluetoothName(record.deviceName).ifBlank { cameraBluetoothName(result.device.name) }
-                if (!matchesCameraName(name, names)) return
-                // Android removes the two-byte company ID: four client-ID bytes followed by LSS advertisement flags.
-                val manufacturer = record.manufacturerSpecificData
-                val requested = (0 until manufacturer.size()).any {
-                    val payload = manufacturer.valueAt(it)
-                    payload.size == 5 && payload[4].toInt() and 2 != 0
-                }
-                if (!requested) return
+                val camera = advertisedCamera(result)
+                if (!matchesCameraName(camera.name, names) || !advertisementHasTransfers(camera.advertisementFlags)) return
                 discovered[result.device.address] = result.device
                 Log.i("OpenBridgeBluetooth", "selected camera advertises pending images")
-                pending.complete(BleCamera(result.device.address, name))
+                pending.complete(camera)
             }
             override fun onScanFailed(errorCode: Int) { pending.completeExceptionally(IllegalStateException("待机扫描失败：$errorCode")) }
         }
@@ -162,166 +260,91 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
 
     @Synchronized
     fun connect(address: String, preserveHistory: Boolean = false): Deferred<BleState> {
+        check(refreshAdapterState()) { "请先打开手机蓝牙" }
         disconnect()
         val token = generation
         val outcome = CompletableDeferred<BleState>()
-        val name = runCatching { cameraBluetoothName(adapter.getRemoteDevice(address).name) }.getOrDefault("")
+        val name = latestAdvertisement(address)?.name?.takeUnless { it == "Nikon 相机" }.orEmpty().ifBlank {
+            runCatching { cameraBluetoothName(adapter.getRemoteDevice(address).name) }.getOrDefault("")
+        }
         mutableState.update { it.copy(history = if (preserveHistory) it.history else emptyList(), cameraName = name, serverName = "")
             .record("正在建立 BLE 通道") }
+        val previous = previousRelease
         connectionJob = scope.launch(Dispatchers.IO) {
-            var ownedGatt: BluetoothGatt? = null
+            awaitPreviousRelease(previous)
+            val connection = synchronized(this@NikonBle) {
+                if (generation != token) throw endedSession(token)
+                NikonGattSession(context, serviceIds,
+                    discovering = { mutableState.update { if (generation == token) it.record("蓝牙已连接，正在发现相机服务") else it } },
+                    controlPoint = { controlRequest(token, it) }, ended = { sessionEnded(token, it) }).also { session = it }
+            }
             try {
-                val ready = CompletableDeferred<Unit>()
-                val notifications = Channel<ByteArray>(16)
-                fun notification(characteristic: BluetoothGattCharacteristic, bytes: ByteArray) {
-                    if (characteristic.uuid == uuid("2000")) {
-                        val stage = bytes.firstOrNull()?.toInt()?.and(255)
-                        Log.i("OpenBridgeBluetooth", "authentication notification stage=$stage bytes=${bytes.size}")
-                        if (notifications.trySend(bytes.clone()).isFailure) {
-                            Log.w("OpenBridgeBluetooth", "authentication notification queue unavailable")
-                        }
-                    }
-                    if (characteristic.uuid == uuid("2008") && bytes.size >= 2) {
-                        val flags = (bytes[0].toInt() and 255) or ((bytes[1].toInt() and 255) shl 8)
-                        val requested = (flags shr 8 and 15) == 1
-                        mutableState.update { it.copy(connectionRequested = requested,
-                            imageTransferRequested = requested && !it.wifiRequested, locationRequested = (flags shr 4 and 15) in 1..2) }
-                        Log.i("OpenBridgeBluetooth", "camera connection request=$requested wifiPreferred=${state.value.wifiRequested}")
-                        if (requested && !state.value.wifiRequested) mutableTransferRequests.tryEmit(Unit)
-                    }
-                }
-                val callback = object : BluetoothGattCallback() {
-                    override fun onConnectionStateChange(connection: BluetoothGatt, status: Int, newState: Int) {
-                        if (generation != token) return
-                        Log.i("OpenBridgeBluetooth", "GATT connection status=$status state=$newState")
-                        if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
-                            connectedToken = token
-                            step(token, "蓝牙已连接，正在发现相机服务")
-                            if (!connection.discoverServices()) ready.completeExceptionally(BleTransportException(257, "服务发现未能启动"))
-                        } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
-                            connectedToken = null
-                            val error = BleTransportException(status)
-                            ready.completeExceptionally(error)
-                            reply?.completeExceptionally(error)
-                            readReply?.completeExceptionally(error)
-                            notifications.close(error)
-                            mutableState.update { if (generation == token) it.copy(authenticated = false).record(error.message.orEmpty()) else it }
-                        }
-                    }
-                    override fun onServicesDiscovered(connection: BluetoothGatt, status: Int) {
-                        if (generation != token) return
-                        Log.i("OpenBridgeBluetooth", "GATT services status=$status")
-                        if (status == BluetoothGatt.GATT_SUCCESS) ready.complete(Unit)
-                        else ready.completeExceptionally(BleTransportException(status, "发现服务失败"))
-                    }
-                    override fun onDescriptorWrite(connection: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-                        if (generation == token) reply?.complete(status)
-                    }
-                    override fun onCharacteristicWrite(connection: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-                        if (generation == token) {
-                            val id = characteristic.uuid.toString().substring(4, 8)
-                            Log.i("OpenBridgeBluetooth", "GATT write result characteristic=$id status=$status")
-                            reply?.complete(status)
-                        }
-                    }
-                    override fun onCharacteristicRead(connection: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-                        if (Build.VERSION.SDK_INT < 33 && generation == token) completeRead(characteristic.value ?: byteArrayOf(), status)
-                    }
-                    override fun onCharacteristicRead(
-                        connection: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray, status: Int
-                    ) {
-                        if (generation == token) completeRead(value, status)
-                    }
-                    override fun onCharacteristicChanged(connection: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-                        if (Build.VERSION.SDK_INT < 33 && generation == token) {
-                            notification(characteristic, characteristic.value ?: byteArrayOf())
-                        }
-                    }
-                    override fun onCharacteristicChanged(connection: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
-                        if (generation == token) notification(characteristic, value)
-                    }
-                }
-                val device = discovered[address] ?: adapter.getRemoteDevice(address)
-                val connection = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
-                    ?: error("无法创建 BLE 连接")
-                ownedGatt = connection
-                synchronized(this@NikonBle) {
-                    check(generation == token) { "蓝牙连接操作已取消" }
-                    gatt = connection
-                }
-                withTimeout(20000) { ready.await() }
+                connection.open(discovered[address] ?: adapter.getRemoteDevice(address))
                 step(token, "已发现相机服务，正在订阅握手响应")
-                val service = smartService(connection) ?: error("相机没有提供 Nikon 智能设备服务")
-                Log.i("OpenBridgeBluetooth", "smart-device service=${service.uuid}")
-                for ((id, indication) in listOf("2000" to true, "2008" to false)) {
-                    val characteristic = service.getCharacteristic(uuid(id)) ?: error("相机缺少配对特征 $id")
-                    check(connection.setCharacteristicNotification(characteristic, true))
-                    val descriptor = characteristic.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"))
-                        ?: error("配对特征不支持通知")
-                    writeOperation {
-                        descriptor.value = if (indication) BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-                            else BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                        connection.writeDescriptor(descriptor)
-                    }
-                }
+                connection.subscribe()
                 val preferences = context.getSharedPreferences("camera-identity", Context.MODE_PRIVATE)
                 val start = ByteArray(17).also { SecureRandom().nextBytes(it); it[0] = 1 }
-                val identity = preferences.getString("bleIdentity", null)?.let { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }
-                    ?: ByteArray(8).also {
-                        SecureRandom().nextBytes(it); it[0] = 1
-                        preferences.edit().putString("bleIdentity", android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP)).apply()
-                    }
+                val identity = synchronized(this@NikonBle) {
+                    if (generation != token || session !== connection || !connection.live) throw endedSession(token)
+                    preferences.getString("bleIdentity", null)?.let { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }
+                        ?: ByteArray(8).also {
+                            SecureRandom().nextBytes(it); it[0] = 1
+                            preferences.edit().putString("bleIdentity", android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP)).apply()
+                        }
+                }
                 check(identity.size == 8)
                 identity.copyInto(start, 9)
                 step(token, "正在验证相机身份：发送请求")
-                write("2000", start)
-                val challenge = authenticationRecord(withTimeout(15000) { notifications.receive() }, 2)
+                connection.write("2000", start)
+                val challenge = connection.authenticationStage(2)
                 val response = NativePtp.pairReply(start, challenge)
                 step(token, "相机挑战校验通过，正在等待最终确认")
-                write("2000", response)
-                val confirmation = authenticationRecord(withTimeout(15000) { notifications.receive() }, 4)
+                connection.write("2000", response)
+                val confirmation = connection.authenticationStage(4)
                 val key = NativePtp.pairingKey(start, challenge, confirmation)
                 check(key.size == 8) { "蓝牙会话密钥生成失败" }
                 synchronized(this@NikonBle) {
-                    check(generation == token && gatt === connection) { "蓝牙连接已取消" }
+                    if (generation != token || session !== connection || !connection.live) {
+                        key.fill(0)
+                        throw endedSession(token)
+                    }
+                    sessionKey?.fill(0)
                     sessionKey = key
                 }
                 Log.i("OpenBridgeBluetooth", "authentication stage 4 accepted; session key derived")
                 step(token, "身份验证通过，正在读取相机信息")
-                val serverName = try { read("2003").toString(Charsets.UTF_8).substringBefore('\u0000').trim() }
+                val serverName = try { connection.read("2003").toString(Charsets.UTF_8).substringBefore('\u0000').trim() }
                 catch (cancelled: CancellationException) { throw cancelled }
+                catch (error: BleTransportException) { throw error }
                 catch (_: Exception) { "" }
                 step(token, "正在读取蓝牙能力与相机信息")
-                featureFlags = try {
-                    val feature = read("2009")
+                val features = try {
+                    val feature = connection.read("2009")
                     if (feature.size >= 4) ByteBuffer.wrap(feature).order(ByteOrder.LITTLE_ENDIAN).int else 0
                 } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                catch (error: BleTransportException) { throw error }
                 catch (_: Exception) { 0 }
-                val serial = try { cameraSerial(read("200b").toString(Charsets.UTF_8)).orEmpty() }
+                synchronized(this@NikonBle) {
+                    if (generation != token || !connection.live) throw endedSession(token)
+                    featureFlags = features
+                }
+                val serial = try { cameraSerial(connection.read("200b").toString(Charsets.UTF_8)).orEmpty() }
                 catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                catch (error: BleTransportException) { throw error }
                 catch (_: Exception) { "" }
-                check(generation == token && connectedToken == token && gatt === connection) { "读取相机能力时 BLE 已断开" }
                 // 2008 is a clock/location/connection request, not an authentication acknowledgement.
-                mutableState.update { if (generation == token) it.copy(authenticated = true, connectedAddress = address, serialNumber = serial,
-                    serverName = serverName)
-                    .record("BLE 身份握手完成；传图需已配对的经典蓝牙设备") else it }
+                synchronized(this@NikonBle) {
+                    if (generation != token || session !== connection || !connection.live) throw endedSession(token)
+                    val verified = state.value.copy(authenticated = true, connectedAddress = address, serialNumber = serial, serverName = serverName)
+                        .record("BLE 身份验证完成")
+                    mutableState.value = verified
+                    outcome.complete(verified)
+                    timeRequests.trySend(Unit)
+                }
                 Log.i("OpenBridgeBluetooth", "authentication completed")
-                outcome.complete(state.value)
             } catch (error: Exception) {
                 if (error !is CancellationException) Log.w("OpenBridgeCamera", "BLE handshake failed", error)
-                synchronized(this@NikonBle) {
-                    if (generation == token) {
-                        // Reject callbacks from the failed GATT before closing it, preserving the actual failure on screen.
-                        generation++
-                        connectedToken = null
-                        sessionKey?.fill(0)
-                        sessionKey = null
-                        if (gatt === ownedGatt) gatt = null
-                        mutableState.update { it.copy(authenticated = false, connectedAddress = "", serialNumber = "",
-                            imageTransferRequested = false, locationRequested = false).record("蓝牙连接失败：${error.message ?: "操作超时"}") }
-                    }
-                }
-                runCatching { ownedGatt?.disconnect(); ownedGatt?.close() }
+                connection.stop(error)
                 outcome.completeExceptionally(error)
                 if (error is CancellationException) throw error
             }
@@ -330,14 +353,88 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
         return outcome
     }
 
-    private fun step(token: Int, message: String) {
+    @Synchronized
+    private fun controlRequest(token: Int, bytes: ByteArray) {
         if (generation != token) return
+        val control = NikonControlPoint.decode(bytes) ?: return
+        val requested = control.connectionRequested
+        timeRequestRevision++
+        mutableState.update { it.copy(connectionRequested = requested, imageTransferRequested = requested && !it.wifiRequested,
+            locationRequested = control.locationRequested, timeRequested = control.timeRequested) }
+        Log.i("OpenBridgeBluetooth", "camera connection request=$requested wifiPreferred=${state.value.wifiRequested}")
+        if (requested && !state.value.wifiRequested) mutableTransferRequests.tryEmit(Unit)
+        if (control.timeRequested) timeRequests.trySend(Unit)
+    }
+
+    private fun timeSyncAllowed(): Boolean {
+        val control = state.value
+        return settings.state.value.requestedTimeSync && control.timeRequested && !control.wifiRequested &&
+            bluetoothDataReady(control.authenticated, control.systemPaired, control.pairingInProgress)
+    }
+
+    private suspend fun syncRequestedTime() {
+        val (token, revision, connection) = synchronized(this) {
+            if (!timeSyncAllowed() || session?.live != true) return
+            Triple(generation, timeRequestRevision, activeSession())
+        }
+        try {
+            val completed = connection.syncRequestedTime(::currentTime) {
+                generation == token && session === connection && connection.live && timeSyncAllowed()
+            }
+            synchronized(this) {
+                if (completed && generation == token && session === connection && timeRequestRevision == revision) {
+                    mutableState.update { it.copy(timeRequested = false) }
+                }
+            }
+            if (completed) Log.i("OpenBridgeBluetooth", "Camera time request synchronized and acknowledged")
+        } catch (cancelled: CancellationException) { currentCoroutineContext().ensureActive() }
+        catch (error: Exception) { Log.w("OpenBridgeBluetooth", "Camera time request could not complete", error) }
+    }
+
+    private suspend fun awaitPreviousRelease(previous: NikonGattSession?) {
+        previous?.awaitRelease()
+        synchronized(this) { if (previousRelease === previous) previousRelease = null }
+    }
+
+    @Synchronized
+    private fun sessionEnded(token: Int, error: Exception) {
+        if (generation != token) return
+        if (error is BleTransportException) transportFailure = token to error
+        generation++
+        previousRelease = session
+        session = null
+        sessionKey?.fill(0)
+        sessionKey = null
+        featureFlags = 0
+        mutableState.update { it.copy(authenticated = false, connectedAddress = "", serialNumber = "",
+            imageTransferRequested = false, connectionRequested = false, locationRequested = false, timeRequested = false)
+            .record("蓝牙连接已结束：${error.message ?: "操作未完成"}") }
+    }
+
+    private fun activeSession() = checkNotNull(session?.takeIf { it.live }) { "蓝牙控制通道未连接" }
+
+    private fun step(token: Int, message: String) {
+        if (generation != token) throw endedSession(token)
         Log.i("OpenBridgeBluetooth", "handshake: $message")
         mutableState.update { if (generation == token) it.record(message) else it }
     }
 
+    private fun endedSession(token: Int): Exception = transportFailure?.takeIf { it.first == token }?.second
+        ?: CancellationException("蓝牙连接操作已取消或被替换")
+
+    @Synchronized
+    fun completePairing(expectedControl: String, classic: String) {
+        check(state.value.authenticated && session?.live == true && state.value.connectedAddress == expectedControl) {
+            "系统配对已保留，但蓝牙控制连接已结束，请重新连接"
+        }
+        mutableState.update { it.copy(pairingInProgress = false, systemPaired = true, classicAddress = classic)
+            .record("系统已配对，蓝牙控制已连接") }
+        timeRequests.trySend(Unit)
+    }
+
     fun pairingStatus(message: String, active: Boolean, paired: Boolean, address: String = "") {
         mutableState.update { it.copy(pairingInProgress = active, systemPaired = paired, classicAddress = address).record(message) }
+        timeRequests.trySend(Unit)
     }
 
     fun connectionMessage(message: String) {
@@ -349,27 +446,33 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
         mutableState.update { it.copy(cameras = (it.cameras.filterNot { old -> old.address == device.address } + device).takeLast(30)) }
     }
 
-    suspend fun prepareSystemPairing() {
+    suspend fun prepareSystemPairing(syncClock: Boolean): String {
         check(state.value.authenticated) { "请先完成 BLE 身份验证" }
         val token = generation
+        val connection = activeSession()
         step(token, "正在登记手机名称")
         val namePayload = bluetoothClientName(Build.MODEL)
-        write("2002", namePayload)
-        mutableState.update { if (generation == token) it.copy(clientName = namePayload.toString(Charsets.UTF_8).substringBefore('\u0000')) else it }
-        val characteristic = gatt?.let(::smartService)?.getCharacteristic(uuid("2006")) ?: return
-        if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE == 0) return
-        step(token, "正在同步相机时间并准备系统配对")
-        try {
-            val now = Instant.now()
-            val rules = ZoneId.systemDefault().rules
-            val offset = rules.getStandardOffset(now).totalSeconds / 60
-            val daylight = rules.getDaylightSavings(now).toMinutes().toInt()
-            write("2006", NativePtp.currentTime(now.toEpochMilli(), offset, daylight))
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (error: Exception) {
-            Log.w("OpenBridgeBluetooth", "optional pairing clock update failed", error)
-            step(token, "校时未完成，继续系统配对")
+        val nameWritten = connection.write("2002", namePayload, tolerateAttributeRejection = true)
+        // Registration has its own server-name read, after the phone name is acknowledged on this same link.
+        val serverName = cameraBluetoothName(connection.read("2003").toString(Charsets.UTF_8))
+        synchronized(this) {
+            if (generation != token || session !== connection || !connection.live) throw endedSession(token)
+            mutableState.update { it.copy(serverName = serverName,
+                clientName = if (nameWritten) namePayload.toString(Charsets.UTF_8).substringBefore('\u0000') else it.clientName) }
         }
+        if (!connection.writable("2006") || !shouldSyncNikonPairingClock(serverName, syncClock)) return serverName
+        step(token, "正在同步相机时间并准备系统配对")
+        val timeWritten = connection.write("2006", currentTime(), tolerateAttributeRejection = true)
+        if (!timeWritten) step(token, "机身未接受校时，继续系统配对")
+        return serverName
+    }
+
+    private fun currentTime(): ByteArray {
+        val now = Instant.now()
+        val rules = ZoneId.systemDefault().rules
+        val offset = rules.getStandardOffset(now).totalSeconds / 60
+        val daylight = rules.getDaylightSavings(now).toMinutes().toInt()
+        return NativePtp.currentTime(now.toEpochMilli(), offset, daylight)
     }
 
     fun reserveWifi() {
@@ -378,29 +481,51 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
 
     fun releaseWifiReservation() {
         mutableState.update { it.copy(wifiRequested = false, imageTransferRequested = it.connectionRequested) }
+        timeRequests.trySend(Unit)
     }
 
-    suspend fun requestWifi() {
+    suspend fun startCameraHotspot(beforeWake: (CameraWifiSettings) -> Unit): CameraWifiSettings {
+        val (connection, key) = synchronized(this) {
+            check(bluetoothDataReady(state.value.authenticated, state.value.systemPaired, state.value.pairingInProgress)) {
+                "请先完成相机蓝牙连接"
+            }
+            activeSession() to (sessionKey?.clone() ?: error("蓝牙认证密钥不可用，请重新连接"))
+        }
+        fun ready(): Boolean {
+            val control = state.value
+            return session === connection && connection.live && control.wifiRequested &&
+                bluetoothDataReady(control.authenticated, control.systemPaired, control.pairingInProgress)
+        }
         try {
-            check(state.value.authenticated) { "请先完成 BLE 身份验证" }
-            check(state.value.systemPaired) { "请先完成系统蓝牙配对，再开启相机 Wi-Fi" }
-            write("2005", byteArrayOf(1))
+            check(ready()) { "Wi-Fi 切换已取消" }
+            try { acknowledgeConnectionRequest(connection, ::ready) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: IllegalStateException) {
+                if (!ready()) throw error
+                Log.i("OpenBridgeBluetooth", "Camera did not acknowledge the pending data request")
+            }
+            if (connection.readable("2001")) check(connection.read("2001").isNotEmpty()) { "相机尚未就绪，请唤醒机身后重试" }
+            val packet = connection.read("2004")
+            check(ready()) { "读取热点配置时蓝牙连接已变化" }
+            val settings = decodeCameraWifiSettings(packet) { NativePtp.decryptConnectionField(key, it) }
+            beforeWake(settings)
+            check(connection.write("2005", byteArrayOf(1), endsControlLink = true, allowed = ::ready)) { "开启热点前蓝牙会话已更换，请重新切换 Wi-Fi" }
             Log.i("OpenBridgeBluetooth", "Wi-Fi wake request accepted by GATT")
-            mutableState.update { it.record("已发送开启 Wi-Fi 请求；请确认机身提示，再连接相机热点") }
+            mutableState.update { it.record("机身已接收开启热点请求，正在交给 Android 连接") }
+            return settings
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) {
             Log.w("OpenBridgeBluetooth", "Wi-Fi wake request failed", error)
             mutableState.update { it.record("请求 Wi-Fi 失败：${error.message}") }
             throw error
-        }
+        } finally { key.fill(0) }
     }
 
+    @Synchronized
     fun locationSession(): Int? {
         val current = state.value
         if (!bluetoothDataReady(current.authenticated, current.systemPaired, current.pairingInProgress) ||
-            connectedToken != generation || sessionKey == null) return null
-        val characteristic = gatt?.let(::smartService)?.getCharacteristic(uuid("2007")) ?: return null
-        if (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE == 0) return null
+            sessionKey == null || session?.let { it.live && it.writable("2007") } != true) return null
         if (featureFlags != 0 && featureFlags and (1 shl 7) == 0) return null
         return generation
     }
@@ -417,28 +542,29 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
         check(state.value.systemPaired) { "请先完成系统蓝牙配对" }
         check(featureFlags == 0 || featureFlags and (1 shl 5) != 0) { "相机未报告蓝牙图片传输能力" }
         stopScan()
-        val control = read("2008")
-        if (control.size == 2 && control[1].toInt() and 15 == 1) {
-            // Acknowledge the wake-up request while preserving the time/location request nibbles.
-            control[1] = (control[1].toInt() and 0xf0).toByte()
-            check(write("2008", control) { !state.value.wifiRequested && !state.value.pairingInProgress }) { "蓝牙传输准备已取消" }
-        }
-        check(write("2005", byteArrayOf(2)) {
+        val connection = activeSession()
+        acknowledgeConnectionRequest(connection) { !state.value.wifiRequested && !state.value.pairingInProgress }
+        check(connection.write("2005", byteArrayOf(2)) {
             val current = state.value
             !current.wifiRequested && bluetoothDataReady(current.authenticated, current.systemPaired, current.pairingInProgress)
         }) { "正在配对或使用 Wi-Fi，蓝牙数据传输暂候" }
     }
 
+    private suspend fun acknowledgeConnectionRequest(connection: NikonGattSession, allowed: () -> Boolean) {
+        val token = generation
+        connection.acknowledgeConnectionRequest { generation == token && session === connection && connection.live && allowed() }
+    }
+
     suspend fun releaseBluetoothTransfer() {
         if (state.value.authenticated && featureFlags and (1 shl 10) != 0) {
-            write("2005", byteArrayOf(0x80.toByte())) { !state.value.wifiRequested && !state.value.pairingInProgress }
+            activeSession().write("2005", byteArrayOf(0x80.toByte())) { !state.value.wifiRequested && !state.value.pairingInProgress }
         }
     }
 
     fun acknowledgeTransferRequest() { mutableState.update { it.copy(imageTransferRequested = false) } }
 
     fun pairedDevices(): List<BleCamera> {
-        check(adapter != null && adapter.isEnabled) { "请先打开手机蓝牙" }
+        check(refreshAdapterState()) { "请先打开手机蓝牙" }
         return adapter.bondedDevices.map {
             BleCamera(it.address, cameraBluetoothName(it.name).ifBlank { "已配对设备" }, it.type != BluetoothDevice.DEVICE_TYPE_LE)
         }
@@ -448,48 +574,8 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
     suspend fun updateLocation(payload: ByteArray, expectedSession: Int) {
         require(payload.size == 41)
         check(locationSession() == expectedSession) { "蓝牙位置同步会话已失效" }
-        write("2007", payload)
+        check(activeSession().write("2007", payload) { locationSession() == expectedSession }) { "蓝牙位置同步会话已失效" }
         check(locationSession() == expectedSession) { "蓝牙位置同步时连接已变化" }
-    }
-
-    private suspend fun write(id: String, value: ByteArray, allowed: () -> Boolean = { true }): Boolean {
-        val connection = gatt ?: error("蓝牙未连接")
-        val characteristic = smartService(connection)?.getCharacteristic(uuid(id)) ?: error("相机不支持特征 $id")
-        return writeOperation(allowed) {
-            val intent = if (id == "2005") " flags=0x${(value.first().toInt() and 255).toString(16)}" else ""
-            Log.i("OpenBridgeBluetooth", "GATT write characteristic=$id bytes=${value.size}$intent")
-            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            characteristic.value = value
-            connection.writeCharacteristic(characteristic)
-        }
-    }
-
-    private fun completeRead(bytes: ByteArray, status: Int) {
-        if (status == BluetoothGatt.GATT_SUCCESS) readReply?.complete(bytes.clone())
-        else readReply?.completeExceptionally(IllegalStateException("BLE 读取被拒：$status"))
-    }
-
-    private suspend fun read(id: String): ByteArray = writes.withLock {
-        val connection = gatt ?: error("蓝牙未连接")
-        val characteristic = smartService(connection)?.getCharacteristic(uuid(id)) ?: error("相机缺少特征 $id")
-        val completion = CompletableDeferred<ByteArray>()
-        readReply = completion
-        try {
-            check(connection.readCharacteristic(characteristic)) { "BLE 读取提交失败" }
-            withTimeoutOrNull(5000) { completion.await() } ?: byteArrayOf()
-        } finally { if (readReply === completion) readReply = null }
-    }
-
-    private suspend fun writeOperation(allowed: () -> Boolean = { true }, start: () -> Boolean): Boolean = writes.withLock {
-        if (!allowed()) return@withLock false
-        val completion = CompletableDeferred<Int>()
-        reply = completion
-        try {
-            check(start()) { "BLE 操作提交失败" }
-            val status = withTimeout(10000) { completion.await() }
-            check(status == BluetoothGatt.GATT_SUCCESS) { "BLE 写入被拒，状态码 $status" }
-            true
-        } finally { if (reply === completion) reply = null }
     }
 
     @Synchronized
@@ -504,24 +590,26 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
     @Synchronized
     fun disconnect() {
         generation++
-        connectedToken = null
+        transportFailure = null
         featureFlags = 0
         sessionKey?.fill(0)
         sessionKey = null
-        reply?.cancel()
-        readReply?.cancel()
         connectionJob?.cancel()
         stopScan()
-        runCatching { gatt?.disconnect(); gatt?.close() }
-        gatt = null
+        session?.let { previousRelease = it; it.stop() }
+        session = null
+        wakeReady?.cancel()
+        wakeReady = null
+        closeWakeGatt(wakeGatt)
+        wakeGatt = null
         mutableState.update { it.copy(authenticated = false, connectedAddress = "", imageTransferRequested = false,
-            connectionRequested = false, locationRequested = false, serialNumber = "") }
+            connectionRequested = false, locationRequested = false, timeRequested = false, serialNumber = "") }
     }
 
     fun close() = disconnect()
 
-    private fun smartService(connection: BluetoothGatt): BluetoothGattService? = serviceIds.asSequence()
-        .mapNotNull(connection::getService).firstOrNull { it.getCharacteristic(uuid("2000")) != null }
-
-    private fun uuid(short: String): UUID = UUID.fromString("0000$short-3dd4-4255-8d62-6dc7b9bd5561")
+    private fun closeWakeGatt(connection: BluetoothGatt?) {
+        runCatching { connection?.disconnect() }
+        runCatching { connection?.close() }
+    }
 }

@@ -47,7 +47,15 @@ Rgb AdjustAndSample(Rgb color, const ColorLook& look, const ColorLut* lut) {
   for (auto& channel : color) channel = 0.5f + (channel - 0.5f) * (1.0f + look.contrast);
   const float luma = color[0] * 0.2126f + color[1] * 0.7152f + color[2] * 0.0722f;
   for (auto& channel : color) channel = Clamp(luma + (channel - luma) * look.saturation);
-  return lut ? SampleLut(*lut, color) : color;
+  if (!lut) return color;
+  if (look.input_encoding == LutEncoding::Rec709Gamma24) {
+    for (float& c : color) c = std::pow(Linear(c), 1.f / 2.4f);
+  }
+  color = SampleLut(*lut, color);
+  if (look.output_encoding == LutEncoding::Rec709Gamma24) {
+    for (float& c : color) c = Encoded(std::pow(std::max(0.f, c), 2.4f));
+  }
+  return color;
 }
 
 }  // namespace
@@ -127,6 +135,7 @@ ColorLut ParseCube(std::string_view source) {
     if (stream >> extra) throw std::invalid_argument("Unexpected data after cube fields");
   }
   if (range_dimension && range_dimension != result.dimension) throw std::invalid_argument("INPUT_RANGE dimension mismatch");
+  result.domain_declared = explicit_domain || input_range;
   ValidateLut(result);
   return result;
 }
@@ -194,6 +203,15 @@ ColorLut FromHaldRgba(std::span<const uint8_t> pixels, size_t side, size_t strid
 }
 
 void ValidateLook(const ColorLook& look) {
+  // Photos use a LUT either directly or as a Rec.709 Gamma 2.4 video LUT on both ends.
+  if (look.input_encoding != look.output_encoding ||
+      (look.input_encoding != LutEncoding::Direct && look.input_encoding != LutEncoding::Rec709Gamma24)) {
+    throw std::invalid_argument("Unsupported display LUT encoding");
+  }
+  ValidateLookParameters(look);
+}
+
+void ValidateLookParameters(const ColorLook& look) {
   const std::array<float, 5> fields{look.strength, look.exposure_ev, look.contrast, look.saturation, look.warmth};
   for (float value : fields) if (!std::isfinite(value)) throw std::invalid_argument("Look parameters must be finite");
   if (look.strength < 0 || look.strength > 1 || look.exposure_ev < -3 || look.exposure_ev > 3 || look.contrast < -1 || look.contrast > 1 ||

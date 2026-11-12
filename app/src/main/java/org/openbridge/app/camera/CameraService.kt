@@ -24,6 +24,7 @@ import org.openbridge.app.R
 class CameraService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var wakeLock: PowerManager.WakeLock? = null
+    private var stoppedAfterDisconnect = false
     override fun onCreate() {
         super.onCreate()
         val notifications = getSystemService(NotificationManager::class.java)
@@ -36,6 +37,11 @@ class CameraService : Service() {
             val controller = CameraController.get(this@CameraService)
             combine(controller.state, controller.bleState, controller.autoState) { camera, ble, auto -> Triple(camera, ble, auto) }
                 .collectLatest { (state, ble, auto) ->
+                    if (state.manuallyDisconnected && !state.connected && !state.connecting) {
+                        stoppedAfterDisconnect = true
+                        stopSelf()
+                        return@collectLatest
+                    }
                     val running = state.tasks.firstOrNull { it.status == DownloadStatus.RUNNING }
                     val needsWake = state.busy || (running != null && !state.transmissionPaused)
                     val lock = wakeLock
@@ -61,13 +67,13 @@ class CameraService : Service() {
     override fun onDestroy() {
         scope.cancel()
         if (wakeLock?.isHeld == true) wakeLock?.release()
-        CameraController.get(this).disconnect()
+        if (!stoppedAfterDisconnect) CameraController.get(this).disconnect()
         super.onDestroy()
     }
     private fun notification(text: String): Notification {
         val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), flags)
-        return Notification.Builder(this, "camera").setSmallIcon(R.drawable.ic_notification).setContentTitle("OpenBridge")
+        return Notification.Builder(this, "camera").setSmallIcon(R.drawable.ic_notification).setContentTitle(getString(R.string.app_name))
             .setContentText(text).setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true).build()
     }
     companion object {

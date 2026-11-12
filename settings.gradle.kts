@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "OpenBridge"
+rootProject.name = "ProofTray"
 include(":app")

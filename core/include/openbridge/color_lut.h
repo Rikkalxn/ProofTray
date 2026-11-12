@@ -21,6 +21,13 @@ struct ColorLut {
   // Red changes fastest in 3D tables. 1D entries hold independent R/G/B curves.
   std::vector<float> values;
   std::string title;
+  bool domain_declared = false;  // Import metadata only; not part of the canonical table or its content hash.
+};
+
+// Values are shared with the Kotlin LutEncoding and the preview shader.
+enum class LutEncoding {
+  Direct = 0, Rec709Gamma24 = 2, NLog = 3, Linear709 = 4, SLog3Cine = 5, SLog3 = 6, Log3G10 = 7, VLog = 8,
+  CLog2 = 9, CLog3 = 10, DLog = 11, LogC3 = 12, LogC4 = 13, SLog2 = 14
 };
 
 struct ColorLook {
@@ -29,6 +36,8 @@ struct ColorLook {
   float contrast = 0;
   float saturation = 1;
   float warmth = 0;
+  LutEncoding input_encoding = LutEncoding::Direct;
+  LutEncoding output_encoding = LutEncoding::Direct;
 };
 
 ColorLut ParseCube(std::string_view source);
@@ -36,6 +45,7 @@ ColorLut ParseLutBinary(std::span<const uint8_t> source);
 std::vector<uint8_t> SerializeLut(const ColorLut& lut);
 ColorLut FromHaldRgba(std::span<const uint8_t> pixels, size_t side, size_t stride);
 void ValidateLut(const ColorLut& lut);
+void ValidateLookParameters(const ColorLook& look);
 void ValidateLook(const ColorLook& look);
 // Per-pixel helpers require validated LUTs/looks. SampleLut clamps finite input to the LUT domain.
 Rgb SampleLut(const ColorLut& lut, const Rgb& input);

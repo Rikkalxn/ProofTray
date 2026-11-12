@@ -133,7 +133,7 @@ MatchState Match(const PhotoAsset& asset, const CatalogFilter& filter, MatchStat
 
 class Groups {
  public:
-  explicit Groups(const std::vector<PhotoAsset>& assets) : assets_(assets), parent_(assets.size()), inferred_(assets.size(), false) {
+  explicit Groups(const std::vector<PhotoAsset>& assets) : assets_(assets), parent_(assets.size()) {
     std::iota(parent_.begin(), parent_.end(), 0);
   }
 
@@ -148,27 +148,23 @@ class Groups {
     return root;
   }
 
-  void Join(size_t first, size_t second, bool inferred = false) {
+  void Join(size_t first, size_t second) {
     first = Find(first);
     second = Find(second);
     if (assets_[second].id < assets_[first].id) std::swap(first, second);
     parent_[second] = first;
-    inferred_[first] = inferred_[first] || inferred_[second] || inferred;
   }
-
-  bool inferred(size_t index) { return inferred_[Find(index)]; }
 
  private:
   const std::vector<PhotoAsset>& assets_;
   std::vector<size_t> parent_;
-  std::vector<bool> inferred_;
 };
 
 bool HasGroupingIdentity(const PhotoAsset& asset) {
   return !asset.source_id.empty() && !asset.folder.empty() && !asset.camera.empty() && asset.captured_at_ms.has_value();
 }
 
-std::vector<MatchState> PairPhotos(const std::vector<PhotoAsset>& assets, Groups& groups) {
+std::vector<MatchState> PairPhotos(const std::vector<PhotoAsset>& assets) {
   using Key = std::tuple<std::string, std::string, std::string, std::string, int64_t>;
   std::map<Key, std::vector<size_t>> buckets;
   std::vector<MatchState> paired(assets.size(), MatchState::kExcluded);
@@ -184,54 +180,17 @@ std::vector<MatchState> PairPhotos(const std::vector<PhotoAsset>& assets, Groups
   for (const auto& [key, members] : buckets) {
     // Ambiguous duplicates (e.g. two same-name RAW imports) must not become a pair.
     if (members.size() != 2 || assets[members[0]].format == assets[members[1]].format) continue;
-    groups.Join(members[0], members[1]);
     paired[members[0]] = paired[members[1]] = MatchState::kMatched;
   }
   return paired;
 }
 
-void CollapseBursts(const std::vector<PhotoAsset>& assets, Groups& groups) {
-  using ExplicitKey = std::tuple<std::string, std::string, std::string, std::string>;
-  using Context = std::tuple<std::string, std::string, std::string, std::string>;
-  std::map<ExplicitKey, size_t> explicit_groups;
-  std::map<Context, std::vector<size_t>> candidates;
-  std::set<size_t> captures;
+void CollapseStacks(const std::vector<PhotoAsset>& assets, Groups& groups) {
+  std::map<std::string, size_t> anchors;
   for (size_t index = 0; index < assets.size(); ++index) {
-    const auto& asset = assets[index];
-    if (!HasGroupingIdentity(asset)) continue;
-    if (!asset.burst_id.empty()) {
-      const ExplicitKey key{asset.source_id, asset.folder, FoldAscii(asset.camera), asset.burst_id};
-      auto [entry, inserted] = explicit_groups.emplace(key, index);
-      if (!inserted) groups.Join(entry->second, index);
-    }
-  }
-  std::set<size_t> explicit_roots;
-  for (size_t index = 0; index < assets.size(); ++index) {
-    if (!assets[index].burst_id.empty()) explicit_roots.insert(groups.Find(index));
-  }
-  for (size_t index = 0; index < assets.size(); ++index) {
-    const auto& asset = assets[index];
-    if (!HasGroupingIdentity(asset) || !asset.burst_id.empty()) continue;
-    const size_t capture = groups.Find(index);
-    if (explicit_roots.contains(capture)) continue;
-    if (!captures.insert(capture).second) continue;
-    candidates[{asset.source_id, asset.folder, FoldAscii(asset.camera), FoldAscii(asset.lens)}].push_back(index);
-  }
-  for (auto& [context, indices] : candidates) {
-    std::sort(indices.begin(), indices.end(), [&](size_t first, size_t second) {
-      return std::tie(assets[first].captured_at_ms, assets[first].id) < std::tie(assets[second].captured_at_ms, assets[second].id);
-    });
-    for (size_t position = 1; position < indices.size(); ++position) {
-      const auto& previous = assets[indices[position - 1]];
-      const auto& current = assets[indices[position]];
-      const int64_t before = *previous.captured_at_ms;
-      const int64_t after = *current.captured_at_ms;
-      // Same-stem ambiguities are not evidence of a burst. Near timestamps alone
-      // are only a heuristic, so mark inferred groups separately for the UI.
-      if (Stem(previous.name) != Stem(current.name) && before <= std::numeric_limits<int64_t>::max() - 1000 && after <= before + 1000) {
-        groups.Join(indices[position - 1], indices[position], true);
-      }
-    }
+    if (assets[index].stack_id.empty()) continue;
+    auto [entry, inserted] = anchors.emplace(assets[index].stack_id, index);
+    if (!inserted) groups.Join(entry->second, index);
   }
 }
 
@@ -265,15 +224,15 @@ bool SortBefore(const PhotoAsset& first, const PhotoAsset& second, SortOrder ord
 
 }  // namespace
 
-CatalogResult QueryCatalog(const std::vector<PhotoAsset>& assets, const CatalogFilter& filter, bool collapse_bursts) {
+CatalogResult QueryCatalog(const std::vector<PhotoAsset>& assets, const CatalogFilter& filter, bool collapse_stacks) {
   Validate(assets, filter);
   Groups groups(assets);
-  const auto paired = PairPhotos(assets, groups);
-  if (collapse_bursts) CollapseBursts(assets, groups);
+  const auto paired = filter.paired_raw_jpeg_only ? PairPhotos(assets) : std::vector<MatchState>{};
+  if (collapse_stacks) CollapseStacks(assets, groups);
   CatalogResult result;
   std::vector<size_t> included;
   for (size_t index = 0; index < assets.size(); ++index) {
-    const MatchState state = Match(assets[index], filter, paired[index]);
+    const MatchState state = Match(assets[index], filter, paired.empty() ? MatchState::kExcluded : paired[index]);
     if (state == MatchState::kMatched) ++result.matched_count;
     if (state == MatchState::kPendingMetadata) ++result.pending_metadata_count;
     if (state == MatchState::kMatched || (state == MatchState::kPendingMetadata && filter.include_unknown_metadata)) included.push_back(index);
@@ -285,7 +244,7 @@ CatalogResult QueryCatalog(const std::vector<PhotoAsset>& assets, const CatalogF
   for (size_t index : included) {
     const size_t anchor = groups.Find(index);
     auto [entry, inserted] = output_groups.emplace(anchor, result.groups.size());
-    if (inserted) result.groups.push_back({anchor, {}, groups.inferred(anchor)});
+    if (inserted) result.groups.push_back({anchor, {}, false});
     result.groups[entry->second].members.push_back(index);
   }
   return result;

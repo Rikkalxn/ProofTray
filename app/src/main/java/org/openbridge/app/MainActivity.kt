@@ -6,6 +6,7 @@ import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.os.Build
 import android.content.pm.PackageManager
@@ -18,6 +19,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.IntentSenderRequest
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
@@ -27,23 +29,30 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.openbridge.app.ui.LibraryActions
 import org.openbridge.app.ui.LibraryScreen
 import org.openbridge.app.data.ExternalPhotoEditor
 import org.openbridge.app.data.MediaDeletion
 import org.openbridge.app.domain.ColorPreset
+import org.openbridge.app.domain.ExportDestination
+import org.openbridge.app.domain.AutoDownloadKind
 import org.openbridge.app.color.LookCodec
 import org.json.JSONObject
+import org.openbridge.app.camera.CameraController
 import org.openbridge.app.camera.CameraLocationService
 import org.openbridge.app.camera.CameraService
 import org.openbridge.app.data.AppSettingsRepository
+import org.openbridge.app.domain.PhotoCollection
 
 class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
-        if (!AppSettingsRepository.get(this).state.value.autoDownload) return
+        if (!AppSettingsRepository.get(this).state.value.automaticEnabled) return
+        if (CameraController.get(this).state.value.manuallyDisconnected) return
         val permissions = if (Build.VERSION.SDK_INT >= 31) {
             listOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN)
         } else listOf(Manifest.permission.ACCESS_FINE_LOCATION)
@@ -59,8 +68,17 @@ class MainActivity : ComponentActivity() {
             val model: LibraryViewModel = viewModel()
             val state by model.state.collectAsStateWithLifecycle()
             var pendingCameraAction by remember { mutableStateOf<(() -> Unit)?>(null) }
-            var requiredPermissions by remember { mutableStateOf(emptyList<String>()) }
+            var pendingWifiAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+            var requiredPermissions by rememberSaveable { mutableStateOf(emptyArray<String>()) }
+            var pairedWifiTarget by rememberSaveable { mutableStateOf<String?>(null) }
+            var pairedWifiGeneration by rememberSaveable { mutableStateOf(-1) }
+            var pairedWifiAutomatic by rememberSaveable { mutableStateOf(false) }
+            var importWifiTarget by rememberSaveable { mutableStateOf<String?>(null) }
+            LaunchedEffect(state.settings.selectedAddress, state.camera.connected) {
+                if (state.camera.connected || importWifiTarget != state.settings.selectedAddress) importWifiTarget = null
+            }
             var editorCopy by rememberSaveable { mutableStateOf<String?>(null) }
+            var editorSourceId by rememberSaveable { mutableStateOf<String?>(null) }
             var preparingEditor by remember { mutableStateOf(false) }
             val mediaDeletion = remember { MediaDeletion(applicationContext) }
             var pendingDeletion by rememberSaveable { mutableStateOf<String?>(null) }
@@ -84,16 +102,20 @@ class MainActivity : ComponentActivity() {
             }
             val locationPermissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
                 if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) startLocationSync()
-                else model.showError("位置同步需要精确位置授权；未启动定位。")
+                else model.showError("位置同步需要精确位置授权；未启动定位。", needsSettings = true)
+            }
+            fun finishEditorCopy(): Uri? {
+                val copy = editorCopy?.let(Uri::parse)
+                val source = editorSourceId
+                editorCopy = null
+                editorSourceId = null
+                if (copy != null && source != null) model.rememberSystemEdit(source, copy)
+                return copy
             }
             val externalEditor = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-                val copy = editorCopy?.let(Uri::parse)
-                editorCopy = null
-                if (copy != null) {
-                    model.importPhotos(listOf(copy), persistPermission = false)
-                    if (result.data?.data != null && result.data?.data != copy) {
-                        model.showError("编辑器可能把结果另存到了其他位置。编辑副本已加入图库，也可以从手机导入另存的结果。")
-                    }
+                val copy = finishEditorCopy()
+                if (copy != null && result.data?.data != null && result.data?.data != copy) {
+                    model.showError("编辑器另存的结果可从手机添加。编辑副本可在「导出」中查看。")
                 }
             }
             val colorPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> model.importColor(uris) }
@@ -109,30 +131,95 @@ class MainActivity : ComponentActivity() {
                     } catch (error: Exception) { model.showError("无法恢复待导出的预设：${error.message}") }
                 }
             }
+            fun runCameraAction(action: () -> Unit) {
+                try { action() } catch (error: Exception) {
+                    model.showError(error.message ?: "无法启动相机操作，请在前台重试", needsSettings = error is SecurityException)
+                }
+            }
+            val phoneWifi = remember { applicationContext.getSystemService(WifiManager::class.java) }
+            fun connectRequestedCamera() {
+                val target = pairedWifiTarget ?: return
+                pairedWifiTarget = null
+                val camera = model.camera.state.value
+                if (AppSettingsRepository.get(this@MainActivity).state.value.selectedAddress == target && camera.generation == pairedWifiGeneration &&
+                    !camera.connected && !camera.connecting) model.camera.wakeWifi()
+            }
+            val wifiPanel = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+                val action = pendingWifiAction ?: if (pairedWifiTarget != null) ::connectRequestedCamera else null
+                pendingWifiAction = null
+                if (action != null) lifecycleScope.launch {
+                    val enabled = withTimeoutOrNull(4000) { while (phoneWifi?.isWifiEnabled != true) delay(150); true } == true
+                    if (enabled) runCameraAction(action) else {
+                        pairedWifiTarget = null
+                        model.showError("手机 Wi-Fi 尚未开启，可以再次点「切换到 Wi-Fi」")
+                    }
+                }
+            }
+            fun openWifiPanel() {
+                try { wifiPanel.launch(Intent(Settings.Panel.ACTION_WIFI)) }
+                catch (_: ActivityNotFoundException) {
+                    try { wifiPanel.launch(Intent(Settings.ACTION_WIFI_SETTINGS)) }
+                    catch (_: ActivityNotFoundException) {
+                        pendingWifiAction = null
+                        pairedWifiTarget = null
+                        model.showError("手机未提供系统 Wi-Fi 面板")
+                    }
+                }
+            }
+            fun withPhoneWifi(action: () -> Unit) {
+                if (phoneWifi?.isWifiEnabled == true) action()
+                else if (pendingWifiAction == null) { pendingWifiAction = action; openWifiPanel() }
+            }
+            fun withRequestedCameraWifi() {
+                if (!pairedWifiAutomatic) { withPhoneWifi(::connectRequestedCamera); return }
+                if (phoneWifi?.isWifiEnabled == true) connectRequestedCamera()
+                else {
+                    importWifiTarget = pairedWifiTarget
+                    pairedWifiTarget = null
+                }
+            }
             val cameraPermissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
                 val action = pendingCameraAction
                 pendingCameraAction = null
-                if (requiredPermissions.all { permission -> checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED }) action?.invoke()
-                else model.showError("连接功能需要附近设备权限；Android 12 及以下的 Wi‑Fi 连接还需要定位权限。")
+                if (requiredPermissions.all { permission -> checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED }) {
+                    if (action != null) runCameraAction(action)
+                    else if (pairedWifiTarget != null) withRequestedCameraWifi()
+                }
+                else {
+                    pairedWifiTarget = null
+                    model.showError("连接功能需要附近设备权限；Android 12 及以下的 Wi‑Fi 连接还需要定位权限。", needsSettings = true)
+                }
             }
-            fun withCameraPermissions(bluetooth: Boolean, scanning: Boolean = false, action: () -> Unit) {
+            fun withCameraPermissions(bluetooth: Boolean, scanning: Boolean = false, wifi: Boolean = !bluetooth, action: () -> Unit) {
+                if (pendingCameraAction != null) return
                 val required = buildList {
                     if (bluetooth && Build.VERSION.SDK_INT >= 31) {
                         if (scanning) add(Manifest.permission.BLUETOOTH_SCAN)
                         add(Manifest.permission.BLUETOOTH_CONNECT)
                     }
-                    if (!bluetooth && Build.VERSION.SDK_INT >= 33) add(Manifest.permission.NEARBY_WIFI_DEVICES)
-                    if ((!bluetooth && Build.VERSION.SDK_INT <= 32) || (bluetooth && scanning && Build.VERSION.SDK_INT <= 30)) {
+                    if (wifi && Build.VERSION.SDK_INT >= 33) add(Manifest.permission.NEARBY_WIFI_DEVICES)
+                    if ((wifi && Build.VERSION.SDK_INT <= 32) || (bluetooth && scanning && Build.VERSION.SDK_INT <= 30)) {
+                        add(Manifest.permission.ACCESS_COARSE_LOCATION)
                         add(Manifest.permission.ACCESS_FINE_LOCATION)
                     }
                 }
-                if (required.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) action()
+                if (required.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) runCameraAction(action)
                 else {
-                    requiredPermissions = required
+                    requiredPermissions = required.toTypedArray()
                     pendingCameraAction = action
                     val notifications = if (Build.VERSION.SDK_INT >= 33) listOf(Manifest.permission.POST_NOTIFICATIONS) else emptyList()
                     cameraPermissions.launch((required + notifications).toTypedArray())
                 }
+            }
+            fun switchToCameraWifi(automatic: Boolean = false) {
+                val target = AppSettingsRepository.get(this@MainActivity).state.value.selectedAddress
+                if (target.isBlank() || pairedWifiTarget != null || pendingCameraAction != null || pendingWifiAction != null) return
+                if (automatic && phoneWifi?.isWifiEnabled != true) { importWifiTarget = target; return }
+                importWifiTarget = null
+                pairedWifiAutomatic = automatic
+                pairedWifiTarget = target
+                pairedWifiGeneration = model.camera.state.value.generation
+                withCameraPermissions(true, scanning = true, wifi = true) { withRequestedCameraWifi() }
             }
             val importPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
                 model.importPhotos(uris)
@@ -141,7 +228,7 @@ class MainActivity : ComponentActivity() {
                 model.exportTo(uri)
             }
             LibraryScreen(
-                state,
+                state.copy(importWifiRequired = importWifiTarget != null && importWifiTarget == state.settings.selectedAddress),
                 LibraryActions(
                     onImport = { importPicker.launch(arrayOf("*/*")) },
                     onFilterChange = model::setFilter,
@@ -150,36 +237,72 @@ class MainActivity : ComponentActivity() {
                     onToggleSelection = model::toggleSelection,
                     onSelectVisible = model::selectVisible,
                     onClearSelection = model::clearSelection,
-                    onSetCollapseBursts = model::setCollapseBursts,
+                    onGroupSelection = model::groupSelection,
+                    onUngroupSelection = model::ungroupSelection,
+                    onSetCollapseStacks = model::setCollapseStacks,
                     onSetRating = model::setRating,
                     onSetPickState = model::setPickState,
+                    onRatePhoto = { id, rating -> model.setRating(rating, setOf(id)) },
+                    onPickPhoto = { id, pick -> model.setPickState(pick, setOf(id)) },
                     onSetTags = model::setTags,
-                    onExport = { options -> if (model.prepareExport(options)) exportPicker.launch(null) },
+                    onExport = { options -> if (model.prepareExport(options)) {
+                        if (options.destination == ExportDestination.GALLERY) model.exportToGallery() else exportPicker.launch(null)
+                    } },
+                    onExportPhotos = { ids, options -> if (model.prepareExport(options, ids)) {
+                        if (options.destination == ExportDestination.GALLERY) model.exportToGallery() else exportPicker.launch(null)
+                    } },
                     onCancelTask = model::cancelTask,
                     onRetryTask = model::retryTask,
                     onPauseExports = model::pauseExports,
+                    onClearExportHistory = model::clearExportHistory,
+                    onClearDownloadHistory = model::clearDownloadHistory,
                     onOpenOutput = { openOutput(Uri.parse(it), model) },
                     onDismissError = model::dismissError,
-                    onConnectCamera = { config -> withCameraPermissions(false) { model.camera.connect(config) } },
+                    onConnectCamera = { config ->
+                        withCameraPermissions(state.settings.sonySelected && !config.sonyCamera, wifi = true) {
+                            withPhoneWifi { model.camera.connect(config) }
+                        }
+                    },
                     onDisconnectCamera = model::disconnectCamera,
+                    onDisconnectWifi = model.camera::disconnectWifiSession,
+                    onRetryConnection = { withCameraPermissions(state.camera.bluetoothAssisted,
+                        scanning = state.camera.bluetoothAssisted, wifi = true) { withPhoneWifi { model.camera.retryConnection() } } },
                     onRefreshCamera = model.camera::refresh,
                     onDiscoverCamera = { withCameraPermissions(false) { model.camera.discoverSta() } },
-                    onOpenWifi = { startActivity(Intent(Settings.Panel.ACTION_WIFI)) },
+                    onOpenWifi = ::openWifiPanel,
                     onScanBle = { withCameraPermissions(true, scanning = true) { model.camera.scanBle() } },
                     onConnectBle = { camera -> withCameraPermissions(true) { model.camera.connectBle(camera) } },
                     onDiscoverClassic = { withCameraPermissions(true, scanning = true) { model.camera.discoverClassic() } },
-                    onWakeWifi = model.camera::wakeWifi,
+                    onStopBleScan = model.camera::stopBleScan,
+                    onWakeWifi = { switchToCameraWifi() },
+                    onSwitchToBluetooth = { withCameraPermissions(true, scanning = true) { model.camera.switchToNikonBluetooth() } },
                     onDownloadSelection = model::downloadSelection,
+                    onDownloadPhoto = model::downloadPhoto,
                     onPauseDownloads = model.camera::pause,
                     onCancelDownload = model.camera::cancel,
                     onRetryDownload = model.camera::retry,
                     onRequestPreview = model.camera::requestPreview,
-                    onSetCollection = model::setCollection,
+                    onPreviewGeometry = model::updatePreviewGeometry,
+                    onSetCollection = { collection ->
+                        // Kept by the maintainer's UX round-2 decision: entering online import still starts paired Wi-Fi setup.
+                        model.setCollection(collection)
+                        val camera = model.camera.state.value
+                        if (collection == PhotoCollection.CAMERA_IMPORT && state.settings.selectedAddress.isNotBlank() &&
+                            !state.browser.showOfflinePreviews && !camera.manuallyDisconnected && !camera.connected && !camera.connecting) {
+                            switchToCameraWifi(automatic = true)
+                        }
+                    },
+                    onSetLibrarySection = model::setLibrarySection,
+                    onPromoteExports = model::promoteExports,
                     onSetImportVisibility = model::setImportVisibility,
                     onSetOfflinePreviews = model::setOfflinePreviews,
                     onSetBatchSize = model.camera::setCatalogBatchSize,
                     onLoadMoreCamera = model.camera::loadMore,
+                    onAutoLoadMoreCamera = model.camera::autoLoadMore,
+                    onStopCatalogRead = model.camera::stopCatalogRead,
+                    onJumpToDay = model.camera::jumpToDay,
                     onClearImportList = model::clearImportList,
+                    onClearImportHistory = model::clearImportHistory,
                     onRemoveFromImport = model::removeFromImport,
                     onRemoveFromLibrary = model::removeFromLibrary,
                     onDeletePhotos = { assets ->
@@ -204,8 +327,17 @@ class MainActivity : ComponentActivity() {
                     },
                     onBeginRegistration = model.camera::beginRegistration,
                     onConfirmRegistration = model.camera::confirmRegistration,
-                    onSetAutoDownload = model::setAutoDownload,
-                    onSetAutoKind = model::setAutoKind,
+                    onSetAutoDownload = { enabled ->
+                        if (enabled) withCameraPermissions(state.settings.autoKind == AutoDownloadKind.CAMERA_JPEG,
+                            scanning = true) { model.setAutoDownload(true) } else model.setAutoDownload(false)
+                    },
+                    onSetAutoKind = { kind ->
+                        if (kind != state.settings.autoKind && state.settings.autoDownload) {
+                            withCameraPermissions(kind == AutoDownloadKind.CAMERA_JPEG, scanning = true) {
+                                model.setAutoKind(kind); model.camera.resumeAutomaticDownloads()
+                            }
+                        } else model.setAutoKind(kind)
+                    },
                     onSetManualVariant = model::setManualVariant,
                     onSetPowerProfile = model::setPowerProfile,
                     onSetLocationSync = { enabled ->
@@ -220,7 +352,7 @@ class MainActivity : ComponentActivity() {
                     onChooseControlDevice = model::chooseControlDevice,
                     onChooseTransferDevice = model::chooseTransferDevice,
                     onSetBluetoothRole = model::setBluetoothRole,
-                    onConnectSavedControl = { withCameraPermissions(true) {
+                    onConnectSavedControl = { withCameraPermissions(true, scanning = true) {
                         runCatching { model.camera.connectSavedControl() }.onFailure { model.showError(it.message ?: "无法连接控制设备") }
                     } },
                     onDisconnectControl = model.camera::disconnectControl,
@@ -228,7 +360,18 @@ class MainActivity : ComponentActivity() {
                     onOpenBluetoothSettings = { startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) },
                     onOpenAppSettings = { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) },
                     onImportColor = { colorPicker.launch(arrayOf("*/*")) },
+                    onSetLutDefault = model::setLutDefault,
+                    onRenameLut = model::renameLut,
+                    onSetLutRemoved = model::setLutRemoved,
+                    onDeleteLut = model::deleteLut,
+                    onDeleteColorPreset = model::deleteColorPreset,
                     onSetLook = model::setLook,
+                    onSetFrame = model::setFrame,
+                    onSetEditor = model::setEditor,
+                    onSetPairingTimeSync = model::setPairingTimeSync,
+                    onSetRequestedTimeSync = model::setRequestedTimeSync,
+                    onSetExportSelection = model::setExportSelection,
+                    onDeleteFrameTemplate = model::deleteFrameTemplate,
                     onSaveColorPreset = model::saveColorPreset,
                     onExportColorPreset = { preset ->
                         exportingPreset = JSONObject().apply {
@@ -247,18 +390,18 @@ class MainActivity : ComponentActivity() {
                             preparingEditor = true
                             try {
                                 val copy = ExternalPhotoEditor(applicationContext).prepare(selected.single())
+                                editorSourceId = selected.single().id
                                 editorCopy = copy.uri.toString()
                                 val edit = Intent(Intent.ACTION_EDIT).apply {
                                     setDataAndType(copy.uri, copy.mimeType)
                                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-                                    clipData = ClipData.newRawUri("OpenBridge 编辑副本", copy.uri)
+                                    clipData = ClipData.newRawUri("编辑副本", copy.uri)
                                 }
                                 check(edit.resolveActivity(packageManager) != null) { "没有可处理此格式的照片编辑器" }
                                 externalEditor.launch(Intent.createChooser(edit, "选择照片编辑器"))
                             } catch (cancelled: CancellationException) { throw cancelled }
                             catch (error: Exception) {
-                                editorCopy?.let { model.importPhotos(listOf(Uri.parse(it)), persistPermission = false) }
-                                editorCopy = null
+                                finishEditorCopy()
                                 model.showError("无法打开系统编辑器：${error.message}")
                             }
                             finally { preparingEditor = false }
@@ -276,7 +419,7 @@ class MainActivity : ComponentActivity() {
                 val intent = Intent(Intent.ACTION_VIEW).apply {
                     setDataAndType(uri, mime)
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    clipData = ClipData.newRawUri("OpenBridge 导出", uri)
+                    clipData = ClipData.newRawUri("导出文件", uri)
                 }
                 startActivity(Intent.createChooser(intent, "打开导出文件"))
             } catch (_: ActivityNotFoundException) {
