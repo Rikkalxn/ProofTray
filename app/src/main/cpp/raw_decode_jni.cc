@@ -87,15 +87,12 @@ jobject WithSignal(JNIEnv* env, jobject signal, Work work) {
 }
 
 template <typename ReadPixel>
-jobject RenderLinear(JNIEnv* env, int width, int height, jfloatArray curve_samples, jbyteArray packed, jfloatArray settings,
+jobject RenderLinear(JNIEnv* env, int width, int height, float baseline_exposure, jbyteArray packed, jfloatArray settings,
                      jfloat gain_ev, jint encoding, jint output_encoding, jboolean video, Cancellation& cancel, ReadPixel read) {
-  if (!curve_samples || env->GetArrayLength(curve_samples) > openbridge::RawToneCurve::kSamples ||
-      !settings || env->GetArrayLength(settings) != 5 || !std::isfinite(gain_ev) || std::abs(gain_ev) > 3) {
+  if (!settings || env->GetArrayLength(settings) != 5 || !std::isfinite(gain_ev) || std::abs(gain_ev) > 3) {
     throw std::invalid_argument("Invalid RAW rendering parameters");
   }
-  std::vector<float> samples(env->GetArrayLength(curve_samples));
-  if (!samples.empty()) env->GetFloatArrayRegion(curve_samples, 0, samples.size(), samples.data());
-  const auto curve = openbridge::RawToneCurve::Parse(samples);
+  const openbridge::RawRenderSettings render_settings{baseline_exposure};
   std::array<float, 5> v{};
   env->GetFloatArrayRegion(settings, 0, 5, v.data());
   if (env->ExceptionCheck()) return nullptr;
@@ -109,8 +106,8 @@ jobject RenderLinear(JNIEnv* env, int width, int height, jfloatArray curve_sampl
   std::optional<openbridge::RawDisplayGrade> display_grade;
   if (scene) {
     if (!lut) throw std::invalid_argument("Scene RAW rendering requires a LUT");
-    log_grade.emplace(openbridge::PrepareRawLogGrade(range, gain_ev, look, openbridge::kGenericRawExposureReference, curve));
-  } else display_grade.emplace(openbridge::PrepareRawDisplayGrade(curve, look));
+    log_grade.emplace(openbridge::PrepareRawLogGrade(range, gain_ev, look, openbridge::kGenericRawExposureReference, render_settings));
+  } else display_grade.emplace(openbridge::PrepareRawDisplayGrade(render_settings, look));
   jobject bitmap = NewBitmap(env, width, height);
   if (!bitmap || env->ExceptionCheck()) return nullptr;
   AndroidBitmapInfo info{};
@@ -155,10 +152,12 @@ extern "C" JNIEXPORT jobject JNICALL Java_org_openbridge_app_data_RawPhotoDecode
     const auto source_width = env->GetFieldID(type, "sourceWidth", "I");
     const auto source_height = env->GetFieldID(type, "sourceHeight", "I");
     const auto color_space = env->GetFieldID(type, "cameraColorSpace", "I");
-    if (!source_width || !source_height || !color_space) return nullptr;
+    const auto baseline = env->GetFieldID(type, "baselineExposureEv", "F");
+    if (!source_width || !source_height || !color_space || !baseline) return nullptr;
     env->SetIntField(preview, source_width, raw->source_width);
     env->SetIntField(preview, source_height, raw->source_height);
     env->SetIntField(preview, color_space, raw->data().makernotes.common.ColorSpace);
+    env->SetFloatField(preview, baseline, raw->displayBaselineExposure());
     auto field = env->GetFieldID(type, "pixels", "Ljava/nio/ByteBuffer;");
     if (!field) return nullptr;
     auto buffer = env->GetObjectField(preview, field);
@@ -223,14 +222,14 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_org_openbridge_app_data_RawPreviewE
 }
 
 extern "C" JNIEXPORT jobject JNICALL Java_org_openbridge_app_data_RawPhotoDecoder_renderPreviewNative(
-    JNIEnv* env, jobject, jobject buffer, jint w, jint h, jfloatArray curve, jbyteArray lut, jfloatArray params, jfloat gain_ev,
+    JNIEnv* env, jobject, jobject buffer, jint w, jint h, jfloat baseline_exposure, jbyteArray lut, jfloatArray params, jfloat gain_ev,
     jint encoding, jint output_encoding, jboolean video, jobject signal) {
   return WithSignal(env, signal, [&](Cancellation& cancel) {
     auto* src = static_cast<const uint8_t*>(env->GetDirectBufferAddress(buffer));
     if (w <= 0 || h <= 0 || w > 1600 || h > 1600 || !src || env->GetDirectBufferCapacity(buffer) != int64_t{w} * h * sizeof(Rgb)) {
       throw std::invalid_argument("Invalid linear preview buffer");
     }
-    return RenderLinear(env, w, h, curve, lut, params, gain_ev, encoding, output_encoding, video, cancel, [&](int x, int y) {
+    return RenderLinear(env, w, h, baseline_exposure, lut, params, gain_ev, encoding, output_encoding, video, cancel, [&](int x, int y) {
       Rgb rgb;
       std::memcpy(rgb.data(), src + (size_t(y) * w + x) * sizeof(Rgb), sizeof(Rgb));
       return rgb;
@@ -239,11 +238,11 @@ extern "C" JNIEXPORT jobject JNICALL Java_org_openbridge_app_data_RawPhotoDecode
 }
 
 extern "C" JNIEXPORT jobject JNICALL Java_org_openbridge_app_data_RawPhotoDecoder_decodeNative(
-    JNIEnv* env, jobject, jint fd, jint edge, jlong budget, jfloatArray curve, jbyteArray lut, jfloatArray params, jfloat gain_ev,
+    JNIEnv* env, jobject, jint fd, jint edge, jlong budget, jbyteArray lut, jfloatArray params, jfloat gain_ev,
     jint encoding, jint output_encoding, jboolean video, jobject signal) {
   return WithSignal(env, signal, [&](Cancellation& cancel) {
     auto raw = ReadLinear(fd, edge, budget, openbridge::RawDecodeSize::Full, cancel);
-    return RenderLinear(env, raw->width, raw->height, curve, lut, params, gain_ev, encoding, output_encoding, video, cancel,
+    return RenderLinear(env, raw->width, raw->height, raw->displayBaselineExposure(), lut, params, gain_ev, encoding, output_encoding, video, cancel,
                         [&](int x, int y) { return raw->pixel(x, y); });
   });
 }

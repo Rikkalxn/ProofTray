@@ -90,4 +90,35 @@ class LutUsageTest {
     @Test fun nativeCodesRemainStable() {
         assertEquals(listOf(0, 2, 4, 14, 5, 6, 3, 7, 8, 9, 10, 11, 12, 13), LutEncoding.entries.map { it.nativeCode })
     }
+
+    @Test fun sceneOutputsRoundTripWithoutChangingOldDeclarations() {
+        for (input in LutEncoding.entries.filter { it.isLog }) for (output in LutUsage.logOutputs) {
+            val usage = LutUsage(input, output)
+            usage.validateForPhoto()
+            val look = ColorLookSettings("output", "a".repeat(64), usage = usage)
+            assertEquals(look, LookCodec.decode(LookCodec.encode(look)))
+            assertEquals(LutEncoding.REC709_G24, LutUsage.forInput(input).output)
+        }
+        assertEquals(LutEncoding.REC709_G24, LookCodec.decodeUsage(LookCodec.encodeUsage(LutUsage.nlog)).output)
+    }
+
+    @Test fun changingLogInputKeepsExplicitOutputAndRange() {
+        val usage = LutUsage(LutEncoding.SLOG2_SGAMUT, LutEncoding.DIRECT, LutRange.VIDEO)
+        val changed = usage.withInput(LutEncoding.NLOG)
+        assertEquals(LutEncoding.DIRECT, changed.output)
+        assertEquals(LutRange.VIDEO, changed.inputRange)
+        assertEquals(LutUsage.direct, changed.withInput(LutEncoding.DIRECT))
+        assertEquals(LutUsage.nlog, usage.copy(outputName = "FUTURE").withInput(LutEncoding.NLOG))
+    }
+
+    @Test fun sceneOutputsRejectUnsupportedCurvesAndRanges() {
+        for (output in LutEncoding.entries.filter { it !in LutUsage.logOutputs }) {
+            assertThrows(IllegalArgumentException::class.java) { LutUsage(LutEncoding.NLOG, output).validateForPhoto() }
+        }
+        for (output in LutUsage.logOutputs) {
+            assertThrows(IllegalArgumentException::class.java) {
+                LutUsage(LutEncoding.NLOG, output, outputRange = LutRange.VIDEO).validateForPhoto()
+            }
+        }
+    }
 }

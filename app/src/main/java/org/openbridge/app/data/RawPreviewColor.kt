@@ -4,15 +4,6 @@ import java.io.DataInputStream
 import java.io.EOFException
 import java.io.InputStream
 
-internal enum class RawPreviewColor { DECODER, ADOBE_RGB, UNSUPPORTED }
-
-internal fun rawPreviewColor(cameraSpace: Int, hasIcc: Boolean, decoderIsSrgb: Boolean, decoderIsSdrRgb: Boolean): RawPreviewColor = when {
-    !decoderIsSdrRgb -> RawPreviewColor.UNSUPPORTED
-    hasIcc || !decoderIsSrgb || cameraSpace == 1 -> RawPreviewColor.DECODER
-    cameraSpace == 2 -> RawPreviewColor.ADOBE_RGB
-    else -> RawPreviewColor.UNSUPPORTED
-}
-
 /** Only inspect JPEG metadata segments. Null means malformed/unknown, not permission to assume an untagged colour space. */
 internal fun jpegHasIccProfile(stream: InputStream): Boolean? {
     val input = DataInputStream(stream)

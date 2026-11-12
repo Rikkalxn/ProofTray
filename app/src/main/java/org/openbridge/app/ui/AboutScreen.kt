@@ -145,6 +145,8 @@ private fun LicenseSheet(onDismiss: () -> Unit) {
         LicenseEntry(stringResource(R.string.app_name), "Apache 2.0", "https://www.apache.org/licenses/LICENSE-2.0", onOpen = openLink)
         LicenseEntry("furble", "MIT", furbleLicense, noticeUrl = furbleLicense, onOpen = openLink)
         LicenseEntry("LibRaw 0.22.3", "LGPL-2.1", "$librawSource/LICENSE.LGPL", noticeUrl = "$librawSource/COPYRIGHT", onOpen = openLink)
+        LicenseEntry("Adobe DNG SDK 参考呈现", "DNG SDK License",
+            "https://android.googlesource.com/platform/external/dng_sdk/+/de700ad461e35af50b28b861943a0b0753b10929/LICENSE", onOpen = openLink)
         LicenseEntry("Nordic Android BLE", "BSD-3-Clause", "https://github.com/nordicsemi/Android-BLE-Library/blob/2.11.0/LICENSE", onOpen = openLink)
         LicenseEntry("JSch", "BSD-3-Clause", "https://github.com/mwiede/jsch/blob/jsch-2.28.8/LICENSE.txt", onOpen = openLink)
         LicenseEntry("Okio", "Apache 2.0", "https://github.com/square/okio/blob/3.16.2/LICENSE.txt", onOpen = openLink)

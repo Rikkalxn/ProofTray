@@ -254,8 +254,8 @@ internal fun ColorEditor(
         }
         Column(Modifier.heightIn(max = controlsHeight).verticalScroll(rememberScrollState()).padding(vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (raw) linear.frame?.toneProfile?.let { profile ->
-                Text(if (profile.origin == org.openbridge.app.data.RawToneOrigin.CAMERA_PREVIEW) "RAW 显影 · 机内参考" else "RAW 显影 · 通用曲线",
+            if (raw && linear.frame != null) {
+                Text(if (look.usesLog) "RAW · 线性输入" else "RAW 显影 · 标准",
                     Modifier.padding(horizontal = 20.dp), style = MaterialTheme.typography.labelSmall)
             }
             state.errorMessage?.let { message ->
@@ -316,6 +316,19 @@ internal fun ColorEditor(
                         Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (look.usesLog) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Text("LUT 输出", style = MaterialTheme.typography.labelLarge)
+                            LutOutputMenu(look.usage) { usage ->
+                                val fromTable = lookKey == look.lutKey
+                                val next = look.withUsage(usage)
+                                onLookChange(next)
+                                renderError = null
+                                if (fromTable) {
+                                    onLookKeyChange(next.lutKey ?: ORIGINAL_KEY)
+                                    actions.onSetLutDefault(lutId, usage)
+                                }
+                            }
+                        }
                         val label = String.format(Locale.ROOT, "%+.1f EV · %.2f×", look.logGainEv, 2.0.pow(look.logGainEv.toDouble()))
                         EditorSlider("额外增益 K", look.logGainEv, -3f..3f, label,
                             onReset = if (look.logGainEv != 0f) ({ onLookChange(look.copy(logGainEv = 0f)) }) else null,
@@ -367,8 +380,8 @@ internal fun ColorEditor(
         renderError = null
     }) { library = false }
     if (rawReferenceInfo) AlertDialog(onDismissRequest = { rawReferenceInfo = false }, title = { Text("RAW 曝光参考") },
-        text = { Text("已应用通用 RAW 曝光参考，K=1 表示不额外增益。该参考尚未针对当前机型标定。" +
-            "此前为补暗调高过 K 的预设，可先复位再观察。") },
+        text = { Text("K=1 表示不额外增益，原图和 0% 不受 K 影响。通用 RAW 参考尚未针对当前机型标定。" +
+            "请先按 LUT 作者的说明确认输入和输出编码，再调整 K。") },
         confirmButton = { TextButton(onClick = { rawReferenceInfo = false }) { Text("关闭") } })
     if (saving) AlertDialog(onDismissRequest = { saving = false }, title = { Text("存为预设") },
         text = { OutlinedTextField(presetName, { presetName = it }, label = { Text("预设名称") }, singleLine = true) },

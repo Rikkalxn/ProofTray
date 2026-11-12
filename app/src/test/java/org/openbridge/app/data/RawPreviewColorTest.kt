@@ -4,19 +4,6 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RawPreviewColorTest {
-    @Test fun cameraAdobeRgbIsUsedOnlyForAnUntaggedPreview() {
-        assertEquals(RawPreviewColor.ADOBE_RGB, rawPreviewColor(2, false, true, true))
-        assertEquals(RawPreviewColor.DECODER, rawPreviewColor(2, true, true, true))
-        assertEquals(RawPreviewColor.DECODER, rawPreviewColor(2, false, false, true))
-        assertEquals(RawPreviewColor.DECODER, rawPreviewColor(1, false, true, true))
-    }
-
-    @Test fun unknownAndHdrPreviewsDoNotBecomeSrgbByAssumption() {
-        assertEquals(RawPreviewColor.UNSUPPORTED, rawPreviewColor(0, false, true, true))
-        assertEquals(RawPreviewColor.UNSUPPORTED, rawPreviewColor(1, true, false, false))
-        assertEquals(RawPreviewColor.DECODER, rawPreviewColor(0, true, true, true))
-    }
-
     @Test fun jpegHeaderCheckDistinguishesIccAbsentAndMalformed() {
         val soi = byteArrayOf(0xff.toByte(), 0xd8.toByte())
         val sos = byteArrayOf(0xff.toByte(), 0xda.toByte())

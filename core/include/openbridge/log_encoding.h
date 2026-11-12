@@ -1,6 +1,8 @@
 #ifndef OPENBRIDGE_LOG_ENCODING_H_
 #define OPENBRIDGE_LOG_ENCODING_H_
 
+#include <optional>
+
 #include "openbridge/color_lut.h"
 #include "openbridge/raw_rendering.h"
 
@@ -24,7 +26,8 @@ struct LogGrade {
   LogRange range;
   Rgb gain;
   float strength, contrast, saturation;
-  RawToneCurve base_curve = RawToneCurve::Identity();
+  std::optional<RawDisplayTransform> base_render = std::nullopt;
+  LutEncoding output_encoding = LutEncoding::Rec709Gamma24;
 };
 
 LogGrade PrepareLogGrade(LogRange range, float k, const ColorLook& look);

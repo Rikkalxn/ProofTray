@@ -37,7 +37,7 @@ data class LutUsage(val inputName: String, val outputName: String, val inputRang
 
     fun validateForPhoto() {
         require(unavailableReason == null) { unavailableReason.orEmpty() }
-        require(this in photoChoices || (input?.isLog == true && output == LutEncoding.REC709_G24 && outputRange == LutRange.FULL)) {
+        require(this in photoChoices || (input?.isLog == true && output in logOutputs && outputRange == LutRange.FULL)) {
             "不支持此 LUT 的输入或输出编码"
         }
     }
@@ -47,7 +47,16 @@ data class LutUsage(val inputName: String, val outputName: String, val inputRang
         val rec709 = LutUsage(LutEncoding.REC709_G24, LutEncoding.REC709_G24)
         val nlog = LutUsage(LutEncoding.NLOG, LutEncoding.REC709_G24)
         val photoChoices = listOf(direct, rec709)
+        val logOutputs = listOf(LutEncoding.DIRECT, LutEncoding.REC709_G24)
         fun forInput(input: LutEncoding) = if (input.isLog) LutUsage(input, LutEncoding.REC709_G24) else LutUsage(input, input)
+    }
+
+    /** Keep explicit output declarations when changing between scene input encodings. Unknown declarations need a fresh choice. */
+    fun withInput(encoding: LutEncoding): LutUsage {
+        val next = forInput(encoding)
+        return if (encoding.isLog && input?.isLog == true && unavailableReason == null) {
+            next.copy(inputRange = inputRange, outputName = outputName, outputRange = outputRange)
+        } else next
     }
 }
 

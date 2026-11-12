@@ -57,9 +57,29 @@ internal fun LutKindMenu(usage: LutUsage, allowLog: Boolean, onChange: (LutUsage
                 DropdownMenuItem(text = { Text(encoding.label) }, enabled = allowLog || !encoding.isLog, onClick = {
                     expanded = false
                     if (encoding != usage.input || usage.unavailableReason != null) {
-                        val next = LutUsage.forInput(encoding)
-                        onChange(if (encoding.isLog && usage.input?.isLog == true) next.copy(inputRange = usage.inputRange) else next)
+                        onChange(usage.withInput(encoding))
                     }
+                })
+            }
+        }
+    }
+}
+
+@Composable
+internal fun LutOutputMenu(usage: LutUsage, onChange: (LutUsage) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    fun label(encoding: LutEncoding?) = when (encoding) {
+        LutEncoding.DIRECT -> "sRGB · 直接显示"
+        LutEncoding.REC709_G24 -> "Rec.709 γ2.4"
+        else -> "不可用"
+    }
+    Box {
+        TextButton(onClick = { expanded = true }) { Text(label(usage.output)) }
+        DropdownMenu(expanded, onDismissRequest = { expanded = false }) {
+            LutUsage.logOutputs.forEach { encoding ->
+                DropdownMenuItem(text = { Text(label(encoding)) }, onClick = {
+                    expanded = false
+                    onChange(usage.copy(outputName = encoding.name, outputRange = org.openbridge.app.domain.LutRange.FULL))
                 })
             }
         }
@@ -177,6 +197,10 @@ internal fun ColorLibraryDetails(
             Row {
                 Text("输入曲线", modifier = Modifier.weight(1f))
                 LutKindMenu(lut.defaultUsage, allowLog) { actions.onSetLutDefault(lut.id, it) }
+            }
+            if (lut.defaultUsage.input?.isLog == true) Row {
+                Text("LUT 输出", modifier = Modifier.weight(1f))
+                LutOutputMenu(lut.defaultUsage) { actions.onSetLutDefault(lut.id, it) }
             }
             val references = state.colorPresets.filter { it.look.lutId == lut.id }
             Text(if (references.isEmpty()) "没有预设引用" else "引用预设：${references.joinToString("、") { it.name }}",

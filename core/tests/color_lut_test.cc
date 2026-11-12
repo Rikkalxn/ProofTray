@@ -242,7 +242,7 @@ void RawExposureReference() {
       Near(openbridge::RenderLogPixel(camera, lut, openbridge::PrepareRawLogGrade(range, 1.f, look)), brighter);
 
       look.strength = 0;
-      const auto original = openbridge::RenderRawDefault(camera, openbridge::RawToneCurve::Generic());
+      const auto original = openbridge::RenderRawDefault(camera, openbridge::PrepareRawDefault());
       const auto base = openbridge::RenderLogPixel(camera, lut, openbridge::PrepareRawLogGrade(range, 1.f, look));
       Near(base, original);
       Near(openbridge::RenderLogPixel(camera, lut, openbridge::PrepareRawLogGrade(range, -2.f, look)), original);
@@ -258,7 +258,7 @@ void RawExposureReference() {
   look.strength = 0;
   const openbridge::Rgb raw_gray{.081f, .081f, .081f};
   const auto neutral = openbridge::RenderLogPixel(raw_gray, lut, openbridge::PrepareRawLogGrade(R::Full10, 0.f, look));
-  Near(neutral, openbridge::RenderRawDefault(raw_gray, openbridge::RawToneCurve::Generic()));
+  Near(neutral, openbridge::RenderRawDefault(raw_gray, openbridge::PrepareRawDefault()));
   Near(openbridge::RenderLogPixel(raw_gray, lut, openbridge::PrepareRawLogGrade(R::Full10, 0.f, look, {1.f, "unity", true})),
        neutral);  // A scene reference change cannot change the ordinary display endpoint.
   Reject([&] { openbridge::PrepareRawLogGrade(R::Full10, 4.f, look); });

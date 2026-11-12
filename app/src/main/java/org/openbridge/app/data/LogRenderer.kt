@@ -14,15 +14,14 @@ internal class LinearRawPreview(val width: Int, val height: Int) {
     @JvmField var sourceWidth: Int = width
     @JvmField var sourceHeight: Int = height
     @JvmField var cameraColorSpace: Int = 0
-    var toneProfile: RawToneProfile = RawToneProfile.generic(RawToneFallback.UNAVAILABLE)
-        internal set
+    @JvmField var baselineExposureEv: Float = 0f
 
     fun thumbnail(edge: Int): LinearRawPreview {
         require(edge > 0)
         val ratio = minOf(1f, edge.toFloat() / maxOf(width, height))
         if (ratio == 1f) return this
         val small = LinearRawPreview(maxOf(1, (width * ratio).roundToInt()), maxOf(1, (height * ratio).roundToInt()))
-        small.toneProfile = toneProfile
+        small.baselineExposureEv = baselineExposureEv
         small.sourceWidth = sourceWidth; small.sourceHeight = sourceHeight
         small.cameraColorSpace = cameraColorSpace
         val src = pixels.asFloatBuffer()

@@ -156,20 +156,29 @@ double LogCoordinate(double full, LogRange range) { return range == LogRange::Fu
 
 LogGrade PrepareLogGrade(LogRange range, float k, const ColorLook& look) {
   ValidateLookParameters(look);
-  if (look.output_encoding != LutEncoding::Rec709Gamma24 || !std::isfinite(k) || k <= 0) throw std::invalid_argument("Invalid Log grade");
+  if ((look.output_encoding != LutEncoding::Rec709Gamma24 && look.output_encoding != LutEncoding::Direct) ||
+      !std::isfinite(k) || k <= 0) throw std::invalid_argument("Invalid Log grade");
   const float gain = k * std::exp2(look.exposure_ev), warm = std::exp2(look.warmth * .25f);
-  return {GetLogEncoding(look.input_encoding), range, {gain * warm, gain, gain / warm}, look.strength, look.contrast, look.saturation};
+  return {GetLogEncoding(look.input_encoding), range, {gain * warm, gain, gain / warm}, look.strength,
+          look.contrast, look.saturation, std::nullopt, look.output_encoding};
 }
 
 Rgb RenderLogPixel(const Rgb& linear_srgb, const ColorLut& lut, const LogGrade& grade) {
-  Rgb base = grade.strength == 1 ? Rgb{} : RenderRawDefault(linear_srgb, grade.base_curve);
+  Rgb base{};
+  if (grade.strength != 1) {
+    if (grade.base_render) base = RenderRawDefault(linear_srgb, *grade.base_render);
+    else for (int i = 0; i < 3; ++i) base[i] = ToSrgb(linear_srgb[i]);
+  }
   if (grade.strength == 0) return base;
   Rgb input = linear_srgb;
   for (int i = 0; i < 3; ++i) input[i] *= grade.gain[i];
   input = grade.spec.ToGamut(input);
   for (float& c : input) c = static_cast<float>(LogCoordinate(grade.spec.encode(c), grade.range));
   auto graded = SampleLut(lut, input);
-  for (float& c : graded) c = .5f + (ToSrgb(std::pow(std::max(0.f, c), 2.4f)) - .5f) * (1.f + grade.contrast);
+  for (float& c : graded) {
+    c = grade.output_encoding == LutEncoding::Direct ? std::clamp(c, 0.f, 1.f) : ToSrgb(std::pow(std::max(0.f, c), 2.4f));
+    c = .5f + (c - .5f) * (1.f + grade.contrast);
+  }
   const float luma = .2126f * graded[0] + .7152f * graded[1] + .0722f * graded[2];
   for (size_t i = 0; i < base.size(); ++i) {
     const float c = std::clamp(luma + (graded[i] - luma) * grade.saturation, 0.f, 1.f);

@@ -23,6 +23,22 @@ License texts and copyright information are also included in the APK assets.
 LibRaw is a separate shared library. ProofTray's JNI adapter and CMake configuration are provided in the source release.
 Rebuild/replacement instructions and optional codec exclusions are in `third_party/libraw/README.md`.
 
+## Adobe DNG SDK reference rendering
+
+The default RAW SDR presentation adapts the exposure/shadows ramp, negative-exposure tone adjustment,
+ACR3 default tone samples, RGB tone application and normalized color-space matrices from Adobe's DNG SDK reference renderer.
+Copyright 2006-2023 Adobe Systems Incorporated. All Rights Reserved.
+Adobe permits use, modification and distribution under the DNG SDK License Agreement in `licenses/Adobe-DNG-SDK.txt`.
+The same agreement is packaged in `app/src/main/assets/licenses/Adobe-DNG-SDK.txt`.
+
+Source: AOSP `platform/external/dng_sdk`, revision `de700ad461e35af50b28b861943a0b0753b10929`,
+`source/dng_render.cpp`, `source/dng_reference.cpp` and `source/dng_color_space.cpp`.
+This is a portable adaptation of the matrix-only SDR presentation stage, not the complete SDK or Lightroom's processing engine.
+RAW parsing, black/white normalization, camera white balance and demosaicing remain in LibRaw.
+No Adobe camera profiles, proprietary Lightroom presets, HDR tables or ICC profile resources are bundled.
+
+This product includes DNG technology under license by Adobe Systems Incorporated.
+
 ## Sony connectivity
 
 Nordic's Android BLE Library 2.11.0 supplies the Android GATT request queue and coroutine bindings, under BSD-3-Clause.
@@ -34,4 +50,5 @@ JSch 2.28.8 provides SSH authentication and direct TCP channels. Its BSD license
 Okio 3.16.2 provides buffered reads and timeouts under Apache-2.0. [Upstream license](https://github.com/square/okio/blob/3.16.2/LICENSE.txt)
 
 The SSH session arrangement and PTP transfer-mode calls were cross-checked against the Apache-2.0 alpha2go project.
-ProofTray uses its own PTP codec and does not link the Go module. [Reference revision](https://github.com/Knallli/alpha2go/tree/02883425c9445c653b2950210187cdd1547320c2)
+ProofTray uses its own PTP codec and does not link the Go module.
+[Reference revision](https://github.com/Knallli/alpha2go/tree/02883425c9445c653b2950210187cdd1547320c2)

@@ -62,6 +62,10 @@ class LinearRaster {
   }
 
   const libraw_data_t& data() const { return decoder_->imgdata; }
+  float displayBaselineExposure() const {
+    const auto& levels = decoder_->imgdata.color.dng_levels;
+    return decoder_->imgdata.idata.dng_version && (levels.parsedfields & LIBRAW_DNGFM_BASELINEEXPOSURE) ? levels.baseline_exposure : 0.f;
+  }
   int width = 0, height = 0;
   int source_width = 0, source_height = 0;
  private:
@@ -77,6 +81,7 @@ class LinearRaster {
     p.gamm[0] = p.gamm[1] = 1;
     p.highlight = 0;
     p.adjust_maximum_thr = 0;
+    p.exp_correc = 0;  // Display BaselineExposure is applied once by the shared reference renderer.
     p.user_qual = 3;
     data.rawparams.max_raw_memory_mb = 512;
     Check(open(), "Open linear RAW");
