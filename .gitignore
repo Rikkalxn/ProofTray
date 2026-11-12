@@ -45,3 +45,6 @@ AGENT.md
 .env
 .env.*
 !.env.example
+docs
+tools
+design
