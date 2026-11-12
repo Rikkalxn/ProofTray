@@ -58,7 +58,6 @@ internal object LogRenderer {
 
     suspend fun export(context: Context, asset: PhotoAsset, edge: Int, lut: ByteArray, look: ColorLookSettings): Bitmap {
         require(look.usesLog)
-        val budget = minOf(48_000_000L, Runtime.getRuntime().maxMemory() / 12).coerceAtLeast(1_000_000L)
-        return RawPhotoDecoder.decode(context, asset, edge, budget, look, lut)
+        return RawPhotoDecoder.decode(context, asset, edge, look, lut)
     }
 }

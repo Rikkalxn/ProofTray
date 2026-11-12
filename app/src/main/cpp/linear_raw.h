@@ -19,14 +19,15 @@ enum class RawDecodeSize { Full, Preview };
 class LinearRaster {
  public:
   LinearRaster(const std::string& path, int max_edge, int64_t budget, RawDecodeSize mode,
-               progress_callback progress = nullptr, void* context = nullptr, bool orient = true) {
-    Initialize([&] { return decoder_->open_file(path.c_str()); }, max_edge, budget, mode, progress, context, orient);
+               progress_callback progress = nullptr, void* context = nullptr, bool orient = true, int64_t memory_budget = 0) {
+    Initialize([&] { return decoder_->open_file(path.c_str()); }, max_edge, budget, mode, progress, context, orient, memory_budget);
   }
 
   LinearRaster(std::unique_ptr<LibRaw_abstract_datastream> input, int max_edge, int64_t budget, RawDecodeSize mode,
-               progress_callback progress = nullptr, void* context = nullptr, bool orient = true) : input_(std::move(input)) {
+               progress_callback progress = nullptr, void* context = nullptr, bool orient = true, int64_t memory_budget = 0)
+      : input_(std::move(input)) {
     if (!input_) throw std::invalid_argument("Missing RAW input stream");
-    Initialize([&] { return decoder_->open_datastream(input_.get()); }, max_edge, budget, mode, progress, context, orient);
+    Initialize([&] { return decoder_->open_datastream(input_.get()); }, max_edge, budget, mode, progress, context, orient, memory_budget);
   }
 
   // White-balanced camera channels, before the default matrix. A future input profile can replace that matrix, not apply it twice.
@@ -70,8 +71,9 @@ class LinearRaster {
   int source_width = 0, source_height = 0;
  private:
   template <typename Open>
-  void Initialize(Open open, int max_edge, int64_t budget, RawDecodeSize mode, progress_callback progress, void* context, bool orient) {
-    if (max_edge < 0 || budget <= 0 || budget > 100000000) throw std::invalid_argument("Invalid RAW dimensions");
+  void Initialize(Open open, int max_edge, int64_t budget, RawDecodeSize mode, progress_callback progress,
+                  void* context, bool orient, int64_t memory_budget) {
+    if (max_edge < 0 || budget <= 0 || budget > 100000000 || memory_budget < 0) throw std::invalid_argument("Invalid RAW dimensions");
     if (progress) decoder_->set_progress_handler(progress, context);
     auto& data = decoder_->imgdata;
     auto& p = data.params;
@@ -91,6 +93,7 @@ class LinearRaster {
     source_height = s.flip & 4 ? s.width : s.height;
     if (!max_edge && int64_t{s.width} * s.height > budget) throw std::runtime_error("RAW output exceeds memory budget");
     p.half_size = mode == RawDecodeSize::Preview && max_edge > 0 && std::max(s.width, s.height) >= int64_t{max_edge} * 2;
+    CheckMemoryBudget(max_edge, memory_budget);
     Check(decoder_->unpack(), "Unpack linear RAW");
     Check(decoder_->dcraw_process(), "Develop camera RGB");
     if (!data.image || data.idata.colors != 3 || !s.width || !s.height) throw std::runtime_error("Expected three camera channels");
@@ -103,6 +106,20 @@ class LinearRaster {
     width = std::max(1, int(std::lround(oriented_width_ * scale)));
     height = std::max(1, int(std::lround(oriented_height_ * scale)));
     if (int64_t{width} * height > budget) throw std::runtime_error("Linear RAW output exceeds memory budget");
+    CheckMemoryBudget(max_edge, memory_budget);
+  }
+
+  void CheckMemoryBudget(int max_edge, int64_t memory_budget) const {
+    if (!memory_budget) return;
+    const auto& s = decoder_->imgdata.sizes;
+    const int64_t raw_pixels = int64_t{s.raw_width} * s.raw_height;
+    const int64_t image_pixels = int64_t{s.width} * s.height;
+    const double scale = max_edge ? std::min(1., double(max_edge) / std::max(s.width, s.height)) : 1.;
+    const int64_t output_pixels = std::max(1L, std::lround(s.width * scale)) * int64_t{std::max(1L, std::lround(s.height * scale))};
+    // Budget raw storage (up to four 16-bit channels), the developed raster and one RGBA_8888 output together.
+    // Export demosaics the entire sensor even for a smaller output; reserve scratch space for LibRaw, LUTs and encoding.
+    const int64_t required = raw_pixels * 8 + std::max(raw_pixels, image_pixels) * 8 + output_pixels * 4 + 64 * 1024 * 1024;
+    if (required > memory_budget) throw std::runtime_error("可用内存不足，无法以当前尺寸显影 RAW，请关闭其他应用后重试");
   }
 
   static void Check(int result, const char* phase) {

@@ -51,8 +51,10 @@ jobject NewBitmap(JNIEnv* environment, int width, int height) {
 namespace {
 using openbridge::Rgb;
 
-std::unique_ptr<openbridge::LinearRaster> ReadLinear(int fd, int edge, int64_t budget, openbridge::RawDecodeSize mode, Cancellation& cancel) {
-  return std::make_unique<openbridge::LinearRaster>(std::make_unique<openbridge::RawFileStream>(fd), edge, budget, mode, Progress, &cancel);
+std::unique_ptr<openbridge::LinearRaster> ReadLinear(int fd, int edge, int64_t budget, openbridge::RawDecodeSize mode,
+                                                     Cancellation& cancel, int64_t memory_budget = 0) {
+  return std::make_unique<openbridge::LinearRaster>(std::make_unique<openbridge::RawFileStream>(fd), edge, budget, mode,
+                                                  Progress, &cancel, true, memory_budget);
 }
 
 // Only called for a bitmap that has not been handed back to Java. Preserve the original JNI failure during cleanup.
@@ -238,10 +240,11 @@ extern "C" JNIEXPORT jobject JNICALL Java_org_openbridge_app_data_RawPhotoDecode
 }
 
 extern "C" JNIEXPORT jobject JNICALL Java_org_openbridge_app_data_RawPhotoDecoder_decodeNative(
-    JNIEnv* env, jobject, jint fd, jint edge, jlong budget, jbyteArray lut, jfloatArray params, jfloat gain_ev,
+    JNIEnv* env, jobject, jint fd, jint edge, jlong memory_budget, jbyteArray lut, jfloatArray params, jfloat gain_ev,
     jint encoding, jint output_encoding, jboolean video, jobject signal) {
   return WithSignal(env, signal, [&](Cancellation& cancel) {
-    auto raw = ReadLinear(fd, edge, budget, openbridge::RawDecodeSize::Full, cancel);
+    if (memory_budget <= 0) throw std::invalid_argument("Invalid RAW memory budget");
+    auto raw = ReadLinear(fd, edge, 100000000, openbridge::RawDecodeSize::Full, cancel, memory_budget);
     return RenderLinear(env, raw->width, raw->height, raw->displayBaselineExposure(), lut, params, gain_ev, encoding, output_encoding, video, cancel,
                         [&](int x, int y) { return raw->pixel(x, y); });
   });

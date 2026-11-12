@@ -17,8 +17,8 @@ import org.openbridge.app.domain.PhotoAsset
 internal object PhotoRenderer {
     suspend fun decode(context: Context, asset: PhotoAsset, maxEdge: Int, mutable: Boolean,
         rawLook: ColorLookSettings = ColorLookSettings()): Bitmap {
+        if (asset.format == MediaFormat.RAW) return RawPhotoDecoder.decode(context, asset, maxEdge, rawLook)
         val budget = minOf(48_000_000L, Runtime.getRuntime().maxMemory() / 12).coerceAtLeast(1_000_000L)
-        if (asset.format == MediaFormat.RAW) return RawPhotoDecoder.decode(context, asset, maxEdge, budget, rawLook)
         return withContext(Dispatchers.IO) {
             val source = ImageDecoder.createSource(context.contentResolver, Uri.parse(asset.uri))
             // Both ImageDecoder and LibRaw apply orientation; no second EXIF rotation is needed.
