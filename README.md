@@ -40,6 +40,15 @@
 需要 JDK 17、Android SDK 36、Build Tools 36.0.0、NDK 28.2.13676358 和 Android CMake 3.22.1。
 使用仓库自带的 Gradle Wrapper；Android Studio 可选，CLion 可独立打开 `core/`。
 
+首次克隆请使用 `git clone --recurse-submodules <仓库地址>`；已有工作区在拉取更新后执行：
+
+```sh
+git submodule update --init --recursive
+```
+
+LibRaw 由 submodule 固定到经审查的上游提交，包含 ILCE-7M5 支持。此命令恢复仓库指定的版本，不会自动升级到最新上游。
+依赖选择和升级方式见 [第三方依赖管理](third_party/README.md)。
+
 配置 `JAVA_HOME` 和 Android SDK 路径后，在仓库根目录运行：
 
 ```powershell
@@ -51,6 +60,7 @@ Linux / macOS 使用 `./gradlew :app:assembleDebug`。Debug APK 输出到 `app/b
 
 仓库包含 [GitHub Actions](.github/workflows/build.yml)：推送、PR 或手动触发时构建 Debug APK，并运行 JVM 与 C++ 核心测试。
 在 GitHub 的 **Actions → Build → 对应运行 → Artifacts** 下载 APK 和测试报告；产物保留 14 天。
+CI 递归检出固定版本的 submodule。GitHub 自动生成的源码 ZIP/TAR 不包含子模块，获取完整源码请使用递归克隆。
 CI 使用临时调试签名，不适合作为稳定更新渠道，也不能保证覆盖已有安装；正式发布使用单独备份的 Release 密钥。
 
 ## 目录与文档
@@ -59,7 +69,7 @@ CI 使用临时调试签名，不适合作为稳定更新渠道，也不能保�
 | --- | --- |
 | `app/` | Android 界面、平台适配、JNI 和 JVM 测试 |
 | `core/` | C++20 目录查询、协议编解码、LUT 与核心测试 |
-| `third_party/` | 随源码分发的第三方组件及原许可证 |
+| `third_party/` | LibRaw submodule、摘取适配的第三方组件及原许可证 |
 | `design/brand/` | 项目图标源文件 |
 | `tools/` | 可选的 Windows 环境、构建和发布脚本 |
 | `docs/` | 构建、协议、产品设计与发布说明 |

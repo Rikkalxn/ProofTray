@@ -15,12 +15,14 @@ The Nikon and Sony companion APKs are local protocol references. Their code, lib
 
 ## LibRaw
 
-RAW development uses [LibRaw 0.22.3](https://github.com/LibRaw/LibRaw/releases/tag/0.22.3),
-commit `cf02d66eb5c19d4e46df7aee0582e47a4918509a`, under the upstream LGPL-2.1 option.
+RAW development uses [LibRaw 0.23.0-Snapshot202611](https://github.com/LibRaw/LibRaw/tree/a9a14b1970d188c25dade81f8326ff00a6e33649),
+commit `a9a14b1970d188c25dade81f8326ff00a6e33649`, under the upstream LGPL-2.1 option.
+This is a pinned development snapshot containing Sony ILCE-7M5 support, not the 0.22.3 stable release.
 Copyright LibRaw LLC and the other contributors identified in its `COPYRIGHT` and source headers.
-The unmodified upstream source and licenses are retained in `third_party/libraw/upstream`.
+The unmodified upstream source and licenses are retained in the `third_party/libraw/upstream` Git submodule.
 License texts and copyright information are also included in the APK assets.
-LibRaw is a separate shared library. ProofTray's JNI adapter and CMake configuration are provided in the source release.
+LibRaw is a separate shared library. Initialize submodules to obtain the full pinned dependency alongside
+ProofTray's JNI adapter and CMake configuration. Source distributions must include the submodule contents.
 Rebuild/replacement instructions and optional codec exclusions are in `third_party/libraw/README.md`.
 
 ## Adobe DNG SDK reference rendering

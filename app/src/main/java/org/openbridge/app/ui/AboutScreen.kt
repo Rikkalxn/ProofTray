@@ -140,11 +140,12 @@ private fun LicenseSheet(onDismiss: () -> Unit) {
         catch (_: Exception) { error = "无法打开链接，请检查是否已安装浏览器。" }
     }
     val furbleLicense = "https://raw.githubusercontent.com/gkoh/furble/master/LICENSE"
-    val librawSource = "https://raw.githubusercontent.com/LibRaw/LibRaw/0.22.3"
+    val librawSource = "https://raw.githubusercontent.com/LibRaw/LibRaw/a9a14b1970d188c25dade81f8326ff00a6e33649"
     BridgeSheet("开源与许可", onDismiss, actions = { TextButton(onClick = onDismiss) { Text("完成") } }, compact = true) {
         LicenseEntry(stringResource(R.string.app_name), "Apache 2.0", "https://www.apache.org/licenses/LICENSE-2.0", onOpen = openLink)
         LicenseEntry("furble", "MIT", furbleLicense, noticeUrl = furbleLicense, onOpen = openLink)
-        LicenseEntry("LibRaw 0.22.3", "LGPL-2.1", "$librawSource/LICENSE.LGPL", noticeUrl = "$librawSource/COPYRIGHT", onOpen = openLink)
+        LicenseEntry("LibRaw 0.23.0-Snapshot202611", "LGPL-2.1", "$librawSource/LICENSE.LGPL",
+            noticeUrl = "$librawSource/COPYRIGHT", onOpen = openLink)
         LicenseEntry("Adobe DNG SDK 参考呈现", "DNG SDK License",
             "https://android.googlesource.com/platform/external/dng_sdk/+/de700ad461e35af50b28b861943a0b0753b10929/LICENSE", onOpen = openLink)
         LicenseEntry("Nordic Android BLE", "BSD-3-Clause", "https://github.com/nordicsemi/Android-BLE-Library/blob/2.11.0/LICENSE", onOpen = openLink)

@@ -1,0 +1,3 @@
+[submodule "libraw"]
+	path = third_party/libraw/upstream
+	url = https://github.com/LibRaw/LibRaw.git

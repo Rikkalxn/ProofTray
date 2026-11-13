@@ -1,4 +1,8 @@
-# LibRaw 0.22.3, source list from the unmodified upstream Makefile.am.
+# LibRaw's pinned submodule; source list from its unmodified Makefile.am.
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/libraw/libraw.h")
+    message(FATAL_ERROR "LibRaw sources are missing. Run git submodule update --init --recursive from the repository root.")
+endif()
+
 set(LIBRAW_SOURCES
     upstream/src/libraw_c_api.cpp
     upstream/src/libraw_datastream.cpp
@@ -7,9 +11,11 @@ set(LIBRAW_SOURCES
     upstream/src/decoders/pana8.cpp
     upstream/src/decoders/decoders_dcraw.cpp
     upstream/src/decoders/sonycc.cpp
+    upstream/src/decoders/sony_arw6.cpp
     upstream/src/decompressors/losslessjpeg.cpp
     upstream/src/decoders/decoders_libraw_dcrdefs.cpp
     upstream/src/decoders/olympus14.cpp
+    upstream/src/decoders/nikonhe.cpp
     upstream/src/decoders/decoders_libraw.cpp
     upstream/src/decoders/dng.cpp
     upstream/src/decoders/fp_dng.cpp
