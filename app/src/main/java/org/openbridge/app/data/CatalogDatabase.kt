@@ -12,7 +12,7 @@ import org.openbridge.app.domain.PhotoAsset
 import org.openbridge.app.domain.SavedFilter
 import org.openbridge.app.domain.jpegRepresentationKey
 
-internal class CatalogDatabase private constructor(context: Context) : SQLiteOpenHelper(context.applicationContext, "openbridge.db", null, 2) {
+internal class CatalogDatabase private constructor(context: Context) : SQLiteOpenHelper(context.applicationContext, "openbridge.db", null, 3) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE photos (id TEXT PRIMARY KEY, uri TEXT NOT NULL UNIQUE, payload TEXT NOT NULL)")
         db.execSQL("CREATE TABLE filters (id TEXT PRIMARY KEY, name TEXT NOT NULL, payload TEXT NOT NULL)")
@@ -32,6 +32,25 @@ internal class CatalogDatabase private constructor(context: Context) : SQLiteOpe
                 }
             }
         }
+        if (oldVersion < 3) migrateCompanionLinks(db)
+    }
+
+    private fun migrateCompanionLinks(db: SQLiteDatabase) {
+        val records = db.query("photos", arrayOf("id", "payload"), null, null, null, null, "rowid").use { cursor ->
+            buildList { while (cursor.moveToNext()) add(cursor.getString(0) to JSONObject(cursor.getString(1))) }
+        }
+        val migrated = migrateCameraCompanions(records.map { RecordCodec.decodeAsset(it.second) })
+        records.zip(migrated).forEach { (record, asset) ->
+            val (id, payload) = record
+            fun link(name: String) = if (payload.isNull(name)) null else payload.getString(name)
+            if (link("derivedFromId") != asset.derivedFromId || link("companionOfId") != asset.companionOfId) {
+                payload.put("derivedFromId", asset.derivedFromId ?: JSONObject.NULL)
+                payload.put("companionOfId", asset.companionOfId ?: JSONObject.NULL)
+                // Update only the two links; preserve every other payload field, URI, row order and import-history entry.
+                val values = ContentValues().apply { put("payload", payload.toString()) }
+                check(db.update("photos", values, "id = ?", arrayOf(id)) == 1) { "无法更新便携 JPEG 的来源关联" }
+            }
+        }
     }
 
     fun loadAssets(): List<PhotoAsset> = readableDatabase.query("photos", arrayOf("payload"), null, null, null, null, "rowid").use { cursor ->
@@ -40,7 +59,9 @@ internal class CatalogDatabase private constructor(context: Context) : SQLiteOpe
             while (cursor.moveToNext()) {
                 val asset = RecordCodec.decodeAsset(JSONObject(cursor.getString(0)))
                 add(asset.copy(importedAtMillis = asset.importedAtMillis ?: asset.cameraFileKey?.let(history::get),
-                    jpegCopyImportedAtMillis = if (asset.derivedFromId == null) history[jpegRepresentationKey(asset)] else null))
+                    jpegCopyImportedAtMillis = if (asset.derivedFromId == null && asset.companionOfId == null) {
+                        history[jpegRepresentationKey(asset)]
+                    } else null))
             }
         }
     }

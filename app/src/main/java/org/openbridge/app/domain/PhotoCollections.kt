@@ -4,7 +4,7 @@ import org.openbridge.app.util.sha256Hex
 import java.util.Locale
 
 enum class PhotoCollection { LIBRARY, CAMERA_IMPORT }
-enum class LibrarySection(val label: String) { ORIGINALS("原片"), EXPORTS("导出") }
+enum class LibrarySection(val label: String) { ORIGINALS("照片"), EXPORTS("导出") }
 enum class ImportVisibility { NEW, ALL, IMPORTED }
 
 data class PhotoBrowserState(
@@ -33,7 +33,7 @@ data class PhotoBrowserState(
 
 private val PhotoAsset.visibleInLibrary: Boolean get() = downloadState == DownloadState.DOWNLOADED && !hiddenFromLibrary
 
-/** Keep the stored parent links when an export is edited again. Promoting a version starts a new family at that photo. */
+/** Only app exports enter this tree. Camera companions have their own exports; promoting a version starts a new family there. */
 internal class ExportVersions(assets: List<PhotoAsset>) {
     private val children = assets.filter { it.derivedFromId != null }.groupBy { it.derivedFromId }
 
@@ -79,9 +79,9 @@ fun collectionAssets(
     variant: DownloadVariant = DownloadVariant.ORIGINAL
 ): List<PhotoAsset> {
     if (browser.collection == PhotoCollection.LIBRARY) {
-        val originals = browser.librarySection == LibrarySection.ORIGINALS
-        if (!originals && browser.exportSourceId != null) return ExportVersions(assets).forSource(browser.exportSourceId)
-        return assets.filter { it.visibleInLibrary && (it.derivedFromId == null) == originals }
+        val photos = browser.librarySection == LibrarySection.ORIGINALS
+        if (!photos && browser.exportSourceId != null) return ExportVersions(assets).forSource(browser.exportSourceId)
+        return assets.filter { it.visibleInLibrary && (it.derivedFromId == null) == photos }
     }
     if (connectedSource == null && !browser.showOfflinePreviews) return emptyList()
     return assets.filter { asset ->

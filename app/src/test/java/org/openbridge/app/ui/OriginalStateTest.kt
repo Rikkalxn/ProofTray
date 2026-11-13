@@ -62,14 +62,22 @@ class OriginalStateTest {
     @Test fun importingPairedJpegDoesNotCountAsImportingNef() {
         val nef = cameraFile("nef", "DSC_0001.NEF", MediaFormat.RAW, DownloadState.REMOTE)
         val jpeg = cameraFile("jpeg", "DSC_0001.JPG", MediaFormat.JPEG, DownloadState.DOWNLOADED)
-        val copy = jpeg.copy(id = "portable", derivedFromId = nef.id, cameraFileKey = "portable-key")
+        val copy = jpeg.copy(id = "portable", companionOfId = nef.id, cameraFileKey = "portable-key")
         assertEquals(nef.cameraCaptureKey, jpeg.cameraCaptureKey)
         assertEquals(OriginalState.JPEG_ONLY, originalStateResolver(listOf(nef, jpeg, copy), false)(copy))
         assertEquals(OriginalState.JPEG_ONLY, originalStateResolver(listOf(jpeg, copy), false)(copy))
+        val orphan = copy.copy(cameraCaptureKey = null)
+        assertEquals(OriginalState.JPEG_ONLY, originalStateResolver(listOf(orphan), false)(orphan))
         val localNef = nef.copy(downloadState = DownloadState.DOWNLOADED)
         assertEquals(OriginalState.LOCAL, originalStateResolver(listOf(localNef, jpeg, copy), false)(copy))
         assertEquals(OriginalState.LOCAL, originalStateResolver(listOf(nef, localNef.copy(id = "wifi"), jpeg, copy), false)(copy))
-        val copyOfJpeg = copy.copy(derivedFromId = jpeg.id)
+        assertEquals(OriginalState.LOCAL, originalStateResolver(listOf(localNef.copy(id = "wifi"), jpeg, copy), false)(copy))
+        val copyOfJpeg = copy.copy(companionOfId = jpeg.id)
         assertEquals(OriginalState.LOCAL, originalStateResolver(listOf(nef, jpeg, copyOfJpeg), false)(copyOfJpeg))
+    }
+
+    @Test fun appExportsAreNotLabeledAsCameraJpegCompanions() {
+        val exported = cameraFile("export", "edited.jpg", MediaFormat.JPEG, DownloadState.DOWNLOADED).copy(derivedFromId = raw.id)
+        assertEquals(OriginalState.NO_ORIGINAL, originalStateResolver(listOf(raw, exported), false)(exported))
     }
 }

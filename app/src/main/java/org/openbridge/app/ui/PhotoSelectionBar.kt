@@ -91,7 +91,7 @@ internal fun SelectionBar(
                     }
                 }
                 when {
-                    onPromote != null -> PrimaryAction("放进图库", onPromote, enabled = count > 0)
+                    onPromote != null -> PrimaryAction("放入照片", onPromote, enabled = count > 0)
                     !importing -> PrimaryAction("导出", onExport, enabled = count > 0)
                     needsCamera && !connected && importCount > 0 -> PrimaryAction("连接相机", onCamera)
                     else -> {

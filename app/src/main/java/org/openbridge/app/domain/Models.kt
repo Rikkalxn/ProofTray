@@ -35,7 +35,8 @@ data class PhotoAsset(
     val importedAtMillis: Long? = null,
     val previewUri: String? = null,
     val jpegCopyImportedAtMillis: Long? = null,
-    val derivedFromId: String? = null,
+    val derivedFromId: String? = null, // Source photo of an app-generated export.
+    val companionOfId: String? = null, // Original represented by a camera-generated portable JPEG.
     val cameraCaptureKey: String? = null,
     val previewRevision: String? = null,
     val stackId: String? = null,

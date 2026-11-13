@@ -88,7 +88,7 @@ internal class CameraJpegSaver(context: Context) {
             "无法完成 JPEG 媒体库保存"
         }
         val template = task.photo.asset.copy(id = key, name = name, format = MediaFormat.JPEG, cameraFileKey = key,
-            inImportList = false, previewUri = null, hiddenFromLibrary = false)
-        return repository.readCameraDownload(template, uri).copy(derivedFromId = task.photo.asset.id)
+            inImportList = false, previewUri = null, hiddenFromLibrary = false, derivedFromId = null, companionOfId = task.photo.asset.id)
+        return repository.readCameraDownload(template, uri)
     }
 }

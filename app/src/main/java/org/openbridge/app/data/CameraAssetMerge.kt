@@ -18,6 +18,9 @@ internal fun mergeCameraAsset(previous: PhotoAsset?, incoming: PhotoAsset, reset
         width = if (keepGeometry) previous.width ?: incoming.width else incoming.width,
         height = if (keepGeometry) previous.height ?: incoming.height else incoming.height,
         derivedFromId = if (previous.downloadState == DownloadState.DOWNLOADED) previous.derivedFromId else incoming.derivedFromId,
+        companionOfId = if (previous.downloadState == DownloadState.DOWNLOADED) {
+            previous.companionOfId ?: incoming.companionOfId
+        } else incoming.companionOfId,
         downloadState = if (queued) DownloadState.QUEUED else incoming.downloadState,
         hiddenFromLibrary = previous.hiddenFromLibrary && incoming.downloadState != DownloadState.DOWNLOADED,
         previewUri = incoming.previewUri ?: previous.previewUri, previewRevision = incoming.previewRevision ?: previous.previewRevision)

@@ -18,7 +18,7 @@ class ImportHistoryTest {
 
     @Test fun downloadedOriginalAndPortableCopyRemainUntouched() {
         val original = remote.copy(uri = "content:raw", downloadState = DownloadState.DOWNLOADED)
-        val portable = original.copy(id = "jpeg", uri = "content:jpeg", format = MediaFormat.JPEG, derivedFromId = remote.id)
+        val portable = original.copy(id = "jpeg", uri = "content:jpeg", format = MediaFormat.JPEG, companionOfId = remote.id)
         val reset = resetImportHistory(listOf(original, portable), false)
         assertSame(original, reset[0])
         assertSame(portable, reset[1])

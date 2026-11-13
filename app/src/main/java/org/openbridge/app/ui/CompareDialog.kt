@@ -198,7 +198,7 @@ private fun ViewerActions(
                 if ((canEdit || canCompare) && (versions > 0 || canPromote)) HorizontalDivider()
                 if (versions > 0) DropdownMenuItem(text = { Text("$versions 个导出版本") },
                     onClick = { more = false; onShowVersions(photo) })
-                if (canPromote) DropdownMenuItem(text = { Text("放进图库") }, onClick = { more = false; onPromote?.invoke(photo) })
+                if (canPromote) DropdownMenuItem(text = { Text("放入照片") }, onClick = { more = false; onPromote?.invoke(photo) })
             }
         }
     }

@@ -12,13 +12,30 @@ class PhotoCollectionsTest {
         downloadState = state, sourceId = source, folder = "card:1/parent:2", inImportList = true, cameraFileKey = "key:$id"
     )
 
-    @Test fun libraryContainsLocalOriginalsOnly() {
+    @Test fun photosContainLocalFilesOnly() {
         val remote = photo("remote")
         val local = photo("local", DownloadState.DOWNLOADED)
         val removed = local.copy(id = "removed", hiddenFromLibrary = true)
         val waiting = photo("waiting", DownloadState.QUEUED)
         val result = collectionAssets(listOf(remote, local, removed, waiting), PhotoBrowserState(), null)
         assertEquals(listOf(local), result)
+    }
+
+    @Test fun cameraCompanionsArePhotosAndOnlyAppExportsCountAsVersions() {
+        val original = photo("raw", DownloadState.DOWNLOADED)
+        val companion = original.copy(id = "portable", format = MediaFormat.JPEG, companionOfId = original.id)
+        val local = original.copy(id = "local", sourceId = "document:photos", cameraFileKey = null)
+        val exported = original.copy(id = "export", format = MediaFormat.JPEG, derivedFromId = original.id)
+        val nested = exported.copy(id = "nested", derivedFromId = exported.id)
+        val fromCompanion = exported.copy(id = "from-portable", derivedFromId = companion.id)
+        val hidden = exported.copy(id = "hidden", hiddenFromLibrary = true)
+        val assets = listOf(original, companion, local, exported, nested, fromCompanion, hidden)
+        assertEquals("照片", LibrarySection.ORIGINALS.label)
+        assertEquals(listOf(original, companion, local), collectionAssets(assets, PhotoBrowserState(), null))
+        val exports = PhotoBrowserState(librarySection = LibrarySection.EXPORTS)
+        assertEquals(listOf(exported, nested, fromCompanion), collectionAssets(assets, exports, null))
+        assertEquals(listOf(exported, nested), ExportVersions(assets).forSource(original.id))
+        assertEquals(listOf(fromCompanion), ExportVersions(assets).forSource(companion.id))
     }
 
     @Test fun connectedImportContainsOnlyLoadedItemsFromThatCamera() {

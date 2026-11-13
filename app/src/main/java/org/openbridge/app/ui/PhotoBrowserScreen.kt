@@ -103,25 +103,29 @@ internal fun originalStateResolver(
     assets: List<PhotoAsset>, importing: Boolean, variant: DownloadVariant = DownloadVariant.ORIGINAL
 ): (PhotoAsset) -> OriginalState {
     val byId = assets.associateBy { it.id }
-    val localFiles = assets.asSequence().filter { it.downloadState == DownloadState.DOWNLOADED && it.derivedFromId == null }
-        .mapNotNull { it.cameraFileKey }.toHashSet()
-    return { asset -> originalState(asset, importing, variant, byId, localFiles) }
+    val originals = assets.filter { it.downloadState == DownloadState.DOWNLOADED && it.derivedFromId == null && it.companionOfId == null }
+    val localFiles = originals.mapNotNull { it.cameraFileKey }.toHashSet()
+    val localRawCaptures = originals.filter { it.format == MediaFormat.RAW }.mapNotNull { it.cameraCaptureKey }.toHashSet()
+    return { asset -> originalState(asset, importing, variant, byId, localFiles, localRawCaptures) }
 }
 
 private fun originalState(
-    asset: PhotoAsset, importing: Boolean, variant: DownloadVariant, byId: Map<String, PhotoAsset>, localFiles: Set<String>
+    asset: PhotoAsset, importing: Boolean, variant: DownloadVariant, byId: Map<String, PhotoAsset>,
+    localFiles: Set<String>, localRawCaptures: Set<String>
 ): OriginalState {
     if (asset.downloadState == DownloadState.QUEUED) return OriginalState.QUEUED
     if (importing) {
         return if (asset.importedAs(variant)) OriginalState.IMPORTED else OriginalState.CAMERA
     }
-    val sourceId = asset.derivedFromId ?: return OriginalState.LOCAL
+    val sourceId = asset.companionOfId ?: asset.derivedFromId ?: return OriginalState.LOCAL
     val source = byId[sourceId]
-    val originalOnPhone = source?.downloadState == DownloadState.DOWNLOADED || source?.cameraFileKey?.let { it in localFiles } == true
-    val fromCamera = source?.sourceId?.let { it != "local" && !it.startsWith("document:") } ?: (asset.cameraCaptureKey != null)
+    val originalOnPhone = source?.downloadState == DownloadState.DOWNLOADED || source?.cameraFileKey?.let { it in localFiles } == true ||
+        (asset.companionOfId != null && asset.cameraCaptureKey?.let { it in localRawCaptures } == true)
+    val fromCamera = asset.companionOfId != null ||
+        (source?.sourceId?.let { it != "local" && !it.startsWith("document:") } ?: (asset.cameraCaptureKey != null))
     return when {
         originalOnPhone || !fromCamera -> OriginalState.LOCAL
-        asset.format == MediaFormat.JPEG -> OriginalState.JPEG_ONLY
+        asset.companionOfId != null && asset.format == MediaFormat.JPEG -> OriginalState.JPEG_ONLY
         else -> OriginalState.NO_ORIGINAL
     }
 }
@@ -161,7 +165,7 @@ internal fun PhotoBrowserScreen(
                 }
             }
             state.browser.exportSourceId?.let { id ->
-                val source = remember(id, state.assets) { state.assets.firstOrNull { it.id == id }?.name ?: "这张原片" }
+                val source = remember(id, state.assets) { state.assets.firstOrNull { it.id == id }?.name ?: "这张照片" }
                 Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(source, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     TextButton(onClick = { onLibrarySection(LibrarySection.EXPORTS) }) { Text("查看全部导出版本") }

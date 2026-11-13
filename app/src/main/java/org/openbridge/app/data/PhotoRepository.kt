@@ -101,7 +101,8 @@ class PhotoRepository private constructor(context: Context) {
             capturedAtMillis = asset.capturedAtMillis ?: parsed.capturedAtMillis, downloadState = DownloadState.DOWNLOADED,
             cameraFileKey = asset.cameraFileKey, inImportList = asset.inImportList, previewUri = asset.previewUri,
             previewRevision = asset.previewRevision,
-            importedAtMillis = System.currentTimeMillis(), cameraCaptureKey = asset.cameraCaptureKey))
+            importedAtMillis = System.currentTimeMillis(), cameraCaptureKey = asset.cameraCaptureKey,
+            derivedFromId = asset.derivedFromId, companionOfId = asset.companionOfId))
     }
 
     suspend fun mergeCameraAssets(assets: List<PhotoAsset>, resetQueued: Boolean = false): Unit = withContext(Dispatchers.IO) {
@@ -241,6 +242,7 @@ class PhotoRepository private constructor(context: Context) {
                         sourceId = previous.sourceId, folder = previous.folder, cameraFileKey = previous.cameraFileKey,
                         inImportList = previous.inImportList, previewUri = previous.previewUri, importedAtMillis = previous.importedAtMillis,
                         jpegCopyImportedAtMillis = previous.jpegCopyImportedAtMillis, derivedFromId = previous.derivedFromId,
+                        companionOfId = previous.companionOfId,
                         cameraCaptureKey = previous.cameraCaptureKey, stackId = previous.stackId
                     )
                     database.putAsset(updated)

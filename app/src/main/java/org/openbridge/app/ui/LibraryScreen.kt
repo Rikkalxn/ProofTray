@@ -103,7 +103,7 @@ private fun LibraryContent(state: LibraryUiState, actions: LibraryActions, showA
     val page = tab
     val exports = page == MainTab.LIBRARY && state.browser.librarySection == LibrarySection.EXPORTS
     val exportSource = state.browser.exportSourceId.takeIf { exports }
-    val listName = if (exportSource != null) "这张原片的导出" else state.browser.librarySection.label
+    val listName = if (exportSource != null) "这张照片的导出" else state.browser.librarySection.label
     fun browseLibrary(section: LibrarySection, source: String? = null) {
         previewId = null
         expandedGroupId = null

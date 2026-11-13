@@ -52,6 +52,7 @@ internal object RecordCodec {
         putNullable("previewRevision", asset.previewRevision)
         putNullable("jpegCopyImportedAtMillis", asset.jpegCopyImportedAtMillis)
         putNullable("derivedFromId", asset.derivedFromId)
+        putNullable("companionOfId", asset.companionOfId)
         putNullable("cameraCaptureKey", asset.cameraCaptureKey)
     }
 
@@ -71,10 +72,16 @@ internal object RecordCodec {
         hiddenFromLibrary = json.optBoolean("hiddenFromLibrary", false), importedAtMillis = json.longOrNull("importedAtMillis"),
         previewUri = json.stringOrNull("previewUri"), previewRevision = json.stringOrNull("previewRevision"),
         jpegCopyImportedAtMillis = json.longOrNull("jpegCopyImportedAtMillis"),
-        derivedFromId = json.stringOrNull("derivedFromId"), cameraCaptureKey = json.stringOrNull("cameraCaptureKey") ?: cameraCaptureKey(
+        derivedFromId = json.stringOrNull("derivedFromId"), companionOfId = json.stringOrNull("companionOfId"),
+        cameraCaptureKey = json.stringOrNull("cameraCaptureKey") ?: cameraCaptureKey(
             json.optString("sourceId", "local"), json.optString("name"), json.longOrNull("capturedAtMillis")
         )
-    )
+    ).let { asset ->
+        // Old export/download task snapshots also use this codec, even after the live catalog has been migrated.
+        if (!json.has("companionOfId") && asset.format == MediaFormat.JPEG && asset.derivedFromId != null && asset.cameraFileKey == asset.id) {
+            migrateCameraCompanions(listOf(asset)).single()
+        } else asset
+    }
 
     private fun cameraKey(json: JSONObject): String? = json.stringOrNull("cameraFileKey") ?: cameraFileKey(
         json.optString("sourceId", "local"), json.optString("folder").substringBefore("/parent:"),

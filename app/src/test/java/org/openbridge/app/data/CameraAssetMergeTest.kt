@@ -80,6 +80,16 @@ class CameraAssetMergeTest {
         assertEquals("incoming-parent", mergeCameraAsset(marked, downloaded, false).derivedFromId)
     }
 
+    @Test fun cameraCompanionLinksSurviveRefreshAndCanBeFilledDuringReimport() {
+        val companion = marked.copy(id = "portable", cameraFileKey = "portable-key", format = MediaFormat.JPEG,
+            downloadState = DownloadState.DOWNLOADED, companionOfId = remote.id)
+        val refreshed = companion.copy(companionOfId = null, rating = 0, tags = emptySet())
+        assertEquals(companion, mergeCameraAsset(companion, refreshed, false))
+        assertEquals(companion, mergeCameraAsset(companion.copy(companionOfId = null), companion, false))
+        val queued = companion.copy(downloadState = DownloadState.QUEUED, companionOfId = null)
+        assertEquals(remote.id, mergeCameraAsset(queued, companion, false).companionOfId)
+    }
+
     @Test fun absentPreviewFieldsDoNotEraseTheCachedPreview() {
         val unchanged = mergeCameraAsset(marked, remote, false)
         assertEquals("cache:old", unchanged.previewUri)
