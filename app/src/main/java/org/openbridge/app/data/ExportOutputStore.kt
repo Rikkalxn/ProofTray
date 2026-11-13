@@ -3,7 +3,6 @@ package org.openbridge.app.data
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
-import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import java.io.FileNotFoundException
@@ -15,24 +14,25 @@ import org.openbridge.app.domain.photoMimeType
 /** Owns only newly created export outputs; published gallery items are never removed by recovery. */
 internal class ExportOutputStore(context: Context) {
     private val resolver = context.applicationContext.contentResolver
+    private val gallery = GalleryPublisher(context)
 
     fun publish(task: ExportTask, output: Uri) {
         if (task.options.destination != ExportDestination.GALLERY) return
-        check(resolver.update(output, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null) == 1) {
-            "图片写入完成，但相册保存未完成"
-        }
+        gallery.publish(output)
     }
+
+    fun restoreGalleryIndex(outputs: List<Uri>) = gallery.restoreIndexOnce("exports-v1", outputs)
 
     fun create(task: ExportTask): Uri {
         if (task.options.destination == ExportDestination.GALLERY) {
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, outputName(task))
                 put(MediaStore.MediaColumns.MIME_TYPE, outputMime(task))
-                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/ProofTray/Edits")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, GalleryPublisher.relativePath)
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
                 task.asset.capturedAtMillis?.let { put(MediaStore.Images.Media.DATE_TAKEN, it) }
             }
-            return resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: error("无法在相册创建导出文件")
+            return resolver.insert(GalleryPublisher.collection, values) ?: error("无法在相册创建导出文件")
         }
         val tree = Uri.parse(task.destinationUri)
         val parent = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))

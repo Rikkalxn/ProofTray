@@ -48,7 +48,7 @@ internal enum class CameraPanel { SEARCH, MANUAL, DIAGNOSTICS }
 @Composable
 internal fun CameraScreen(
     state: LibraryUiState, actions: LibraryActions, onBrowse: () -> Unit, onRegister: () -> Unit,
-    modifier: Modifier = Modifier, initialPanel: CameraPanel? = null, importing: Boolean = false
+    modifier: Modifier = Modifier, initialPanel: CameraPanel? = null
 ) {
     var panel by rememberSaveable { mutableStateOf(initialPanel) }
     var menu by remember { mutableStateOf(false) }
@@ -66,7 +66,7 @@ internal fun CameraScreen(
     LaunchedEffect(initialPanel) {
         if (initialPanel == CameraPanel.SEARCH && !state.ble.scanning) actions.onScanBle()
     }
-    val primary = cameraPrimaryAction(state, summary, importing)
+    val primary = cameraPrimaryAction(state, summary)
     LazyColumn(modifier = modifier, contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {

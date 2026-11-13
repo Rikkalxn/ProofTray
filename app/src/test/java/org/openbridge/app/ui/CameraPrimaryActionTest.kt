@@ -53,25 +53,4 @@ class CameraPrimaryActionTest {
             assertEquals(CameraAction.WAKE_WIFI, cameraPrimaryAction(disconnected).action)
         }
     }
-
-    @Test fun deferredImportOffersWifiOnWithoutChangingTheExplicitConnectionPage() {
-        for (state in listOf(nikon, sony)) {
-            val deferred = state.copy(importWifiRequired = true)
-            val importing = cameraPrimaryAction(deferred, importing = true)
-            assertEquals(CameraAction.WAKE_WIFI, importing.action)
-            assertEquals("打开 Wi-Fi 后连接", importing.label)
-            assertEquals(cameraPrimaryAction(state), cameraPrimaryAction(deferred))
-        }
-        assertEquals(CameraAction.ADD, cameraPrimaryAction(empty.copy(importWifiRequired = true), importing = true).action)
-    }
-
-    @Test fun deferredWifiDoesNotOverrideConnectionProgressOrAReadyConnection() {
-        val waiting = nikon.copy(importWifiRequired = true)
-        val connected = waiting.copy(camera = waiting.camera.copy(connected = true, connectionPhase = ConnectionPhase.READY))
-        assertEquals(CameraAction.BROWSE, cameraPrimaryAction(connected, importing = true).action)
-        val connecting = waiting.copy(camera = waiting.camera.copy(connecting = true, connectionPhase = ConnectionPhase.PTP))
-        assertEquals(CameraAction.CANCEL, cameraPrimaryAction(connecting, importing = true).action)
-        val disconnecting = waiting.copy(camera = waiting.camera.copy(connectionPhase = ConnectionPhase.DISCONNECTING))
-        assertEquals(CameraAction.NONE, cameraPrimaryAction(disconnecting, importing = true).action)
-    }
 }

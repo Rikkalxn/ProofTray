@@ -44,7 +44,6 @@ data class LibraryUiState(
     val importHistoryCount: Long = 0, val clearingImportHistory: Boolean = false,
     val exportPaused: Boolean = false,
     val camera: CameraState = CameraState(),
-    val importWifiRequired: Boolean = false,
     val ble: BleState = BleState(),
     val cameraEndpoints: List<CameraEndpoint> = emptyList(),
     val look: ColorLookSettings = ColorLookSettings(),

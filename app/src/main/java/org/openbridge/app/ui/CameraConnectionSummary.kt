@@ -21,7 +21,7 @@ internal fun cameraConnectionSummary(state: LibraryUiState): CameraConnectionSum
             camera.message.orEmpty(), false, ready)
         !ble.adapterEnabled -> CameraConnectionSummary("手机蓝牙已关闭", "开启手机蓝牙后可连接相机；已有 Wi-Fi 连接仍可使用", false, false)
         state.settings.sonySelected -> CameraConnectionSummary(if (camera.sonyControlConnected) "索尼蓝牙已连接" else "已配对 · 相机未连接",
-            "导入时通过蓝牙连接相机 Wi-Fi", false, false)
+            "需要浏览和导入原片时，再连接相机 Wi-Fi", false, false)
         ble.pairingInProgress -> CameraConnectionSummary("正在连接蓝牙", ble.message, true, false)
         state.automatic.checking -> CameraConnectionSummary("正在检查待传照片", state.automatic.message, true, ready)
         state.automatic.transferring -> CameraConnectionSummary("蓝牙传图中", state.automatic.message, false, ready)
@@ -40,7 +40,7 @@ internal data class CameraPrimaryAction(val action: CameraAction, val label: Str
 
 /** The import card and connection page share the same action priority; no protocol or retry policy lives here. */
 internal fun cameraPrimaryAction(
-    state: LibraryUiState, summary: CameraConnectionSummary = cameraConnectionSummary(state), importing: Boolean = false
+    state: LibraryUiState, summary: CameraConnectionSummary = cameraConnectionSummary(state)
 ): CameraPrimaryAction {
     val camera = state.camera
     val saved = state.settings.selectedAddress.isNotBlank()
@@ -50,7 +50,6 @@ internal fun cameraPrimaryAction(
         camera.connectionPhase == ConnectionPhase.DISCONNECTING -> CameraPrimaryAction(CameraAction.NONE, "正在断开")
         summary.busy -> CameraPrimaryAction(CameraAction.CANCEL, "取消连接", BridgeGlyph.CLOSE)
         camera.connected -> CameraPrimaryAction(CameraAction.BROWSE, "浏览照片", BridgeGlyph.PHOTOS)
-        importing && saved && state.importWifiRequired -> CameraPrimaryAction(CameraAction.WAKE_WIFI, "打开 Wi-Fi 后连接", BridgeGlyph.WIFI)
         !saved && camera.manuallyDisconnected -> CameraPrimaryAction(CameraAction.MANUAL, "重新连接 Wi-Fi", BridgeGlyph.WIFI)
         !state.ble.adapterEnabled -> CameraPrimaryAction(CameraAction.BLUETOOTH_SETTINGS, "打开手机蓝牙", BridgeGlyph.BLUETOOTH)
         nikon -> CameraPrimaryAction(CameraAction.WAKE_WIFI, "切换到 Wi-Fi", BridgeGlyph.WIFI)

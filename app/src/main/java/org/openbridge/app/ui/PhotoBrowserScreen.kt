@@ -140,7 +140,7 @@ internal fun PhotoBrowserScreen(
     if (importing && !browsingCamera) {
         Column(Modifier.fillMaxSize()) {
             CameraScreen(state, actions, onBrowse = { actions.onSetCollection(PhotoCollection.CAMERA_IMPORT) },
-                onRegister = onRegister, modifier = Modifier.weight(1f), importing = true)
+                onRegister = onRegister, modifier = Modifier.weight(1f))
             if (cached > 0) TextButton(onClick = { actions.onSetOfflinePreviews(true) }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
                 Text("查看 $cached 张离线预览")
             }
@@ -296,7 +296,7 @@ private fun BrowserEmptyState(state: LibraryUiState, actions: LibraryActions, on
                 disconnecting -> "正在断开相机"
                 importing && state.camera.connecting -> "正在连接相机"
                 importing && state.camera.manuallyDisconnected && !state.browser.showOfflinePreviews -> "相机已断开"
-                importing && !state.camera.connected && !state.browser.showOfflinePreviews -> "相机未连接"
+                importing && !state.camera.connected && !state.browser.showOfflinePreviews -> cameraConnectionSummary(state).title
                 importing && state.camera.catalogError != null -> "目录读取中断"
                 importing && state.camera.readingCatalog -> "正在读取相机目录"
                 importing && state.camera.catalogStopped -> "已停止读取"
@@ -314,6 +314,10 @@ private fun BrowserEmptyState(state: LibraryUiState, actions: LibraryActions, on
                 importing && state.camera.connecting -> TextButton(onClick = actions.onDisconnectCamera) { Text("取消连接") }
                 importing && !state.camera.connected -> {
                     val saved = state.settings.selectedAddress.isNotBlank()
+                    if (saved && !state.settings.sonySelected) {
+                        Text("蓝牙便携图会保存到图库和系统相册；浏览相机原片时再连接 Wi-Fi", textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     PrimaryAction(if (saved) "切换到 Wi-Fi" else "连接相机", if (saved) actions.onWakeWifi else onCamera, glyph = BridgeGlyph.CAMERA)
                     if (cached > 0 && !state.browser.showOfflinePreviews) {
                         TextButton(onClick = { actions.onSetOfflinePreviews(true) }) { Text("查看 $cached 张离线预览") }

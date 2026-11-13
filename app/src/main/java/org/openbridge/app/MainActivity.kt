@@ -19,7 +19,6 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.IntentSenderRequest
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
@@ -46,7 +45,6 @@ import org.openbridge.app.camera.CameraController
 import org.openbridge.app.camera.CameraLocationService
 import org.openbridge.app.camera.CameraService
 import org.openbridge.app.data.AppSettingsRepository
-import org.openbridge.app.domain.PhotoCollection
 
 class MainActivity : ComponentActivity() {
     override fun onResume() {
@@ -72,11 +70,6 @@ class MainActivity : ComponentActivity() {
             var requiredPermissions by rememberSaveable { mutableStateOf(emptyArray<String>()) }
             var pairedWifiTarget by rememberSaveable { mutableStateOf<String?>(null) }
             var pairedWifiGeneration by rememberSaveable { mutableStateOf(-1) }
-            var pairedWifiAutomatic by rememberSaveable { mutableStateOf(false) }
-            var importWifiTarget by rememberSaveable { mutableStateOf<String?>(null) }
-            LaunchedEffect(state.settings.selectedAddress, state.camera.connected) {
-                if (state.camera.connected || importWifiTarget != state.settings.selectedAddress) importWifiTarget = null
-            }
             var editorCopy by rememberSaveable { mutableStateOf<String?>(null) }
             var editorSourceId by rememberSaveable { mutableStateOf<String?>(null) }
             var preparingEditor by remember { mutableStateOf(false) }
@@ -171,12 +164,7 @@ class MainActivity : ComponentActivity() {
                 else if (pendingWifiAction == null) { pendingWifiAction = action; openWifiPanel() }
             }
             fun withRequestedCameraWifi() {
-                if (!pairedWifiAutomatic) { withPhoneWifi(::connectRequestedCamera); return }
-                if (phoneWifi?.isWifiEnabled == true) connectRequestedCamera()
-                else {
-                    importWifiTarget = pairedWifiTarget
-                    pairedWifiTarget = null
-                }
+                withPhoneWifi(::connectRequestedCamera)
             }
             val cameraPermissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
                 val action = pendingCameraAction
@@ -211,12 +199,9 @@ class MainActivity : ComponentActivity() {
                     cameraPermissions.launch((required + notifications).toTypedArray())
                 }
             }
-            fun switchToCameraWifi(automatic: Boolean = false) {
+            fun switchToCameraWifi() {
                 val target = AppSettingsRepository.get(this@MainActivity).state.value.selectedAddress
                 if (target.isBlank() || pairedWifiTarget != null || pendingCameraAction != null || pendingWifiAction != null) return
-                if (automatic && phoneWifi?.isWifiEnabled != true) { importWifiTarget = target; return }
-                importWifiTarget = null
-                pairedWifiAutomatic = automatic
                 pairedWifiTarget = target
                 pairedWifiGeneration = model.camera.state.value.generation
                 withCameraPermissions(true, scanning = true, wifi = true) { withRequestedCameraWifi() }
@@ -228,7 +213,7 @@ class MainActivity : ComponentActivity() {
                 model.exportTo(uri)
             }
             LibraryScreen(
-                state.copy(importWifiRequired = importWifiTarget != null && importWifiTarget == state.settings.selectedAddress),
+                state,
                 LibraryActions(
                     onImport = { importPicker.launch(arrayOf("*/*")) },
                     onFilterChange = model::setFilter,
@@ -283,15 +268,7 @@ class MainActivity : ComponentActivity() {
                     onRetryDownload = model.camera::retry,
                     onRequestPreview = model.camera::requestPreview,
                     onPreviewGeometry = model::updatePreviewGeometry,
-                    onSetCollection = { collection ->
-                        // Kept by the maintainer's UX round-2 decision: entering online import still starts paired Wi-Fi setup.
-                        model.setCollection(collection)
-                        val camera = model.camera.state.value
-                        if (collection == PhotoCollection.CAMERA_IMPORT && state.settings.selectedAddress.isNotBlank() &&
-                            !state.browser.showOfflinePreviews && !camera.manuallyDisconnected && !camera.connected && !camera.connecting) {
-                            switchToCameraWifi(automatic = true)
-                        }
-                    },
+                    onSetCollection = model::setCollection,
                     onSetLibrarySection = model::setLibrarySection,
                     onPromoteExports = model::promoteExports,
                     onSetImportVisibility = model::setImportVisibility,

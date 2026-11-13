@@ -85,6 +85,7 @@ class BatchExportManager(context: Context) {
 
     suspend fun restore() = withContext(Dispatchers.IO) {
         val completedOutputs = mutableListOf<ExportTask>()
+        var galleryOutputs: List<Uri>? = null
         mutex.withLock {
             if (restored) return@withLock
             val recovered = database.loadTasks().map { task ->
@@ -95,8 +96,11 @@ class BatchExportManager(context: Context) {
             }
             database.putTasks(recovered)
             mutableTasks.value = recovered
+            galleryOutputs = recovered.filter { it.status == ExportStatus.COMPLETED && it.options.destination == ExportDestination.GALLERY }
+                .mapNotNull { it.outputUri?.let(Uri::parse) }
             restored = true
         }
+        galleryOutputs?.let { outputsToScan -> scope.launch { outputs.restoreGalleryIndex(outputsToScan) } }
         completedOutputs.forEach { rememberOutput(it.asset, Uri.parse(checkNotNull(it.outputUri))) }
     }
 

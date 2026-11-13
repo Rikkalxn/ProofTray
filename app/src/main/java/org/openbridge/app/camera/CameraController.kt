@@ -4,7 +4,6 @@ import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
 import android.net.Network
-import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
@@ -34,6 +33,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.openbridge.app.data.PhotoRepository
+import org.openbridge.app.data.GalleryPublisher
 import org.openbridge.app.data.sourceGeometry
 import org.openbridge.app.data.AppSettingsRepository
 import org.openbridge.app.domain.DownloadVariant
@@ -63,6 +63,7 @@ class CameraController private constructor(private val context: Context) {
     private val changed = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val catalogChanged = changed.asSharedFlow()
     private val repository = PhotoRepository.get(context)
+    private val gallery = GalleryPublisher(context)
     private val settings = AppSettingsRepository.get(context)
     private val bluetoothPairing: BluetoothPairingCoordinator by lazy {
         BluetoothPairingCoordinator(context, scope, ble, settings) {
@@ -150,6 +151,9 @@ class CameraController private constructor(private val context: Context) {
                 mutableState.update { it.copy(tasks = recovered) }
                 journal.save(recovered)
             }
+            val originals = state.value.tasks.filter { it.status == DownloadStatus.COMPLETED && it.variant == DownloadVariant.ORIGINAL }
+                .mapNotNull { it.outputUri?.let(Uri::parse) }
+            scope.launch { gallery.restoreIndexOnce("camera-originals-v1", originals) }
             for (signal in wake) {
                 while (state.value.connected && !state.value.paused) {
                     val task = state.value.tasks.firstOrNull { it.status == DownloadStatus.QUEUED && it.channel == DownloadChannel.WIFI } ?: break
@@ -444,7 +448,6 @@ class CameraController private constructor(private val context: Context) {
             } else {
                 disconnectWifi()
                 releaseWifiPreference()
-                if (settings.state.value.sonySelected) sony.close()
             }
         }
         if (state.value.connecting) { if (all) finish() else disconnect(); return }
@@ -824,10 +827,10 @@ class CameraController private constructor(private val context: Context) {
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, photo.asset.name)
                     put(MediaStore.MediaColumns.MIME_TYPE, requireNotNull(photoMimeType(photo.asset.name)) { "无法确定原片格式" })
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/ProofTray")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, GalleryPublisher.relativePath)
                     put(MediaStore.MediaColumns.IS_PENDING, 1)
                 }
-                val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                val collection = GalleryPublisher.collection
                 output = context.contentResolver.insert(collection, values) ?: error("无法创建待导入文件")
                 current = task.copy(outputUri = output.toString())
                 try { updateTask(task.id) { current } } catch (error: Exception) {
@@ -851,9 +854,7 @@ class CameraController private constructor(private val context: Context) {
                 override suspend fun awaitResume() = awaitDownloadResume(task.id)
             })
             if (task.id in cancelled) throw CancellationException("已取消导入")
-            check(context.contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null) == 1) {
-                "文件已接收，但未能完成媒体库保存"
-            }
+            gallery.publish(uri)
             val completed = repository.readCameraDownload(photo.asset, uri)
             publish(listOf(completed))
             updateTask(task.id) { it.copy(status = DownloadStatus.COMPLETED, message = "原片已保存") }
