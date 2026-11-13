@@ -87,6 +87,7 @@ import org.openbridge.app.domain.LutRange
 import kotlin.math.pow
 import org.openbridge.app.color.LutRepository
 import org.openbridge.app.domain.ColorLookSettings
+import org.openbridge.app.domain.DEFAULT_LUT_STRENGTH
 import org.openbridge.app.domain.LutPreviewData
 import org.openbridge.app.domain.PhotoAsset
 import java.util.Locale
@@ -350,8 +351,9 @@ internal fun ColorEditor(
                         }
                     }
                 }
+                val defaultStrength = if (lutId != null) DEFAULT_LUT_STRENGTH else 1f
                 if (blendable) EditorSlider("强度", look.strength, 0f..1f, "${(look.strength * 100).roundToInt()}%",
-                    onReset = if (look.strength != 1f) ({ onLookChange(look.copy(strength = 1f)) }) else null) {
+                    onReset = if (look.strength != defaultStrength) ({ onLookChange(look.copy(strength = defaultStrength)) }) else null) {
                     onLookChange(look.copy(strength = it))
                 }
             } else {

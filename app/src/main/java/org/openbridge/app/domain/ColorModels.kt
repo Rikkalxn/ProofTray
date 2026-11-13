@@ -1,5 +1,7 @@
 package org.openbridge.app.domain
 
+const val DEFAULT_LUT_STRENGTH = .5f
+
 data class ColorLookSettings(
     val name: String = "原图", val lutId: String? = null, val strength: Float = 1f,
     val exposure: Float = 0f, val contrast: Float = 0f, val saturation: Float = 1f, val warmth: Float = 0f, val usage: LutUsage = LutUsage.direct,
@@ -36,7 +38,7 @@ const val LINEAR_DOMAIN_WARNING = "线性 LUT 未声明输入范围，高光会�
 
 data class LutAsset(val id: String, val name: String, val dimension: Int, val size: Int, val sourceFormat: String, val defaultUsage: LutUsage,
     val implicitUnitDomain: Boolean? = null, val removed: Boolean = false) {
-    fun look() = ColorLookSettings(name, id, usage = defaultUsage)
+    fun look() = ColorLookSettings(name, id, strength = DEFAULT_LUT_STRENGTH, usage = defaultUsage)
     fun domainWarning(usage: LutUsage = defaultUsage) =
         LINEAR_DOMAIN_WARNING.takeIf { implicitUnitDomain == true && usage.input == LutEncoding.LINEAR_709 }
 }
