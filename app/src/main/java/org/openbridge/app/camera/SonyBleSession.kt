@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.os.SystemClock
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
@@ -16,6 +17,9 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -30,6 +34,9 @@ import no.nordicsemi.android.ble.ktx.suspend
 @SuppressLint("MissingPermission")
 internal class SonyControl(private val context: Context, private val report: (Boolean) -> Unit) {
     private var current: SonyBleSession? = null
+    private val connections = Mutex()
+    private val locationRevision = MutableStateFlow(0)
+    val locationChanges = locationRevision.asStateFlow()
 
     suspend fun pair(address: String) {
         val (device, session) = session(address)
@@ -48,14 +55,23 @@ internal class SonyControl(private val context: Context, private val report: (Bo
         return session.networkId()
     }
 
-    private suspend fun session(address: String): Pair<BluetoothDevice, SonyBleSession> {
+    suspend fun location(address: String): SonyBleSession {
+        val (device, session) = session(address)
+        check(device.bondState == BluetoothDevice.BOND_BONDED) { "请先在手机和机身确认索尼配对" }
+        check(session.supportsLocation) { "此机身未提供蓝牙位置关联服务" }
+        return session
+    }
+
+    @Synchronized fun isCurrent(session: SonyBleSession): Boolean = current === session && session.live
+
+    private suspend fun session(address: String): Pair<BluetoothDevice, SonyBleSession> = connections.withLock {
         val device = requireNotNull(context.getSystemService(BluetoothManager::class.java).adapter) { "手机不支持蓝牙" }.getRemoteDevice(address)
         val caller = currentCoroutineContext()
         val (previous, session) = synchronized(this) {
             caller.ensureActive()
-            current?.takeIf { it.live && it.bluetoothDevice?.address == address }?.let { return device to it }
+            current?.takeIf { it.live && it.bluetoothDevice?.address == address }?.let { return@withLock device to it }
             val previous = current
-            val next = SonyBleSession(context, ::controlState)
+            val next = SonyBleSession(context, ::controlState) { locationRevision.update { it + 1 } }
             current = next
             report(false)
             previous to next
@@ -70,7 +86,7 @@ internal class SonyControl(private val context: Context, private val report: (Bo
             session.close()
             throw failure
         }
-        return device to session
+        device to session
     }
 
     @Synchronized private fun controlState(session: SonyBleSession, ready: Boolean) { if (current === session) report(ready) }
@@ -88,23 +104,57 @@ internal class SonyControl(private val context: Context, private val report: (Bo
 
 /** Foreground control session for the camera selected by the user. Nordic serializes the GATT requests and CCCD writes. */
 @SuppressLint("MissingPermission")
-internal class SonyBleSession(context: Context, private val report: (SonyBleSession, Boolean) -> Unit) : BleManager(context) {
+internal class SonyBleSession(
+    context: Context, private val report: (SonyBleSession, Boolean) -> Unit, locationChanged: () -> Unit
+) : BleManager(context) {
     @Volatile private var control: BluetoothGattService? = null
     @Volatile private var pairing: BluetoothGattService? = null
+    @Volatile private var location: BluetoothGattService? = null
     private val stopped = AtomicBoolean(false)
     private val hotspotRequests = Mutex()
+    private val gattRequests = Mutex()
     @Volatile private var hotspotStatus: SonyHotspotStatus? = null
     val live: Boolean get() = !stopped.get() && isReady
+    val supportsLocation: Boolean get() = listOf(SonyLocationProtocol.STATUS, SonyLocationProtocol.LOCATION,
+        SonyLocationProtocol.CAPABILITIES, SonyLocationProtocol.LOCK, SonyLocationProtocol.ENABLE,
+        SonyLocationProtocol.TIME_SETTING, SonyLocationProtocol.AREA_SETTING).all { location.find(it) != null }
+    val locationSync = SonyLocationSession(object : SonyLocationTransport {
+        override val live: Boolean get() = this@SonyBleSession.live
+        override suspend fun read(id: Int): ByteArray = this@SonyBleSession.read(requiredLocation(id))
+        override suspend fun write(id: Int, value: ByteArray, allowed: () -> Boolean) {
+            try { this@SonyBleSession.write(requiredLocation(id), value, allowed = allowed) }
+            catch (error: RequestFailedException) {
+                if (id != SonyLocationProtocol.LOCK || !value.contentEquals(byteArrayOf(1))) throw error
+                val message = when (error.status) {
+                    0x9d -> "机身暂不允许位置关联，请检查机身设置"
+                    0x9f -> "位置关联正由其他设备使用，请先关闭其他手机或 Creators’ App 的位置关联"
+                    else -> "机身拒绝位置关联（${error.status}）"
+                }
+                throw IllegalStateException(message, error)
+            }
+        }
+        override suspend fun observe(callback: ((ByteArray) -> Unit)?) {
+            val status = requiredLocation(SonyLocationProtocol.STATUS)
+            setNotificationCallback(status).with { _, data -> data.value?.let { callback?.invoke(it) } }
+            val notify = status.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
+            val request = if (callback != null) {
+                if (notify) enableNotifications(status) else enableIndications(status)
+            } else if (notify) disableNotifications(status) else disableIndications(status)
+            await(request, 8000)
+        }
+        override fun close() = this@SonyBleSession.close()
+    }, SystemClock::elapsedRealtimeNanos, locationChanged)
 
     override fun isRequiredServiceSupported(gatt: BluetoothGatt): Boolean {
         control = gatt.getService(SonyControlData.controlService)
         pairing = gatt.getService(SonyControlData.pairingService)
+        location = gatt.getService(SonyLocationProtocol.service)
         return control != null
     }
 
     override fun onDeviceReady() { if (!stopped.get()) report(this, true) }
     override fun onServicesInvalidated() {
-        control = null; pairing = null
+        control = null; pairing = null; location = null
         hotspotStatus?.failed(IOException("索尼蓝牙连接已结束"))
         report(this, false)
     }
@@ -112,12 +162,12 @@ internal class SonyBleSession(context: Context, private val report: (SonyBleSess
     override fun close() {
         if (!stopped.compareAndSet(false, true)) return
         hotspotStatus?.failed(IOException("索尼蓝牙连接已结束"))
-        control = null; pairing = null
+        control = null; pairing = null; location = null
         try { super.close() } finally { report(this, false) }
     }
 
     override fun initialize() {
-        // Negotiate room for the hotspot and access records within the connect request's timeout.
+        // Negotiate room for hotspot, access and location records within the connect request's timeout.
         requestMtu(247).enqueue()
     }
 
@@ -229,6 +279,7 @@ internal class SonyBleSession(context: Context, private val report: (SonyBleSess
     }
 
     private fun required(id: Int) = requireNotNull(control.find(id)) { "机身没有提供所需的索尼蓝牙功能（${id.toString(16)}）" }
+    private fun requiredLocation(id: Int) = requireNotNull(location.find(id)) { "机身位置关联服务已失效" }
 
     private fun BluetoothGattService?.find(id: Int): BluetoothGattCharacteristic? =
         this?.characteristics?.firstOrNull { (it.uuid.mostSignificantBits ushr 32) == id.toLong() }
@@ -239,11 +290,14 @@ internal class SonyBleSession(context: Context, private val report: (SonyBleSess
         return requireNotNull(value) { "相机返回空的蓝牙数据" }
     }
 
-    private suspend fun write(characteristic: BluetoothGattCharacteristic, value: ByteArray, timeout: Long = 8000) {
-        await(writeCharacteristic(characteristic, value, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT), timeout)
+    private suspend fun write(
+        characteristic: BluetoothGattCharacteristic, value: ByteArray, timeout: Long = 8000, allowed: () -> Boolean = { true }
+    ) {
+        await(writeCharacteristic(characteristic, value, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT), timeout, allowed)
     }
 
-    private suspend fun await(request: TimeoutableRequest, timeout: Long) {
+    private suspend fun await(request: TimeoutableRequest, timeout: Long, allowed: () -> Boolean = { true }) = gattRequests.withLock {
+        check(!stopped.get() && allowed()) { "索尼蓝牙请求已失效，请等待新的位置或重新连接" }
         try { request.timeout(timeout).suspend() }
         catch (error: Exception) {
             if (error is CancellationException || error is DeviceDisconnectedException || error is BluetoothDisabledException ||

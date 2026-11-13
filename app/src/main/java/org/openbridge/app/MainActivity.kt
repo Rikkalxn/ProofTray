@@ -319,10 +319,11 @@ class MainActivity : ComponentActivity() {
                     onSetPowerProfile = model::setPowerProfile,
                     onSetLocationSync = { enabled ->
                         if (!enabled) { model.setLocationSync(false); CameraLocationService.stop(this@MainActivity) }
-                        else if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-                            startLocationSync()
-                        } else {
-                            locationPermissions.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+                        else withCameraPermissions(state.settings.sonySelected, wifi = false) {
+                            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                                startLocationSync()
+                            } else locationPermissions.launch(
+                                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
                         }
                     },
                     onRefreshPairedDevices = { withCameraPermissions(true) { model.refreshPairedDevices() } },

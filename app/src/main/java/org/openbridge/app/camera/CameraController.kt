@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
 import android.net.Network
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
@@ -58,6 +59,7 @@ class CameraController private constructor(private val context: Context) {
     private val network = CameraNetwork(context, scope)
     internal val ble = NikonBle(context, scope)
     private val sony = SonyControl(context) { ready -> mutableState.update { it.copy(sonyControlConnected = ready) } }
+    internal val sonyLocationChanges = sony.locationChanges
     val bleState = ble.state
     val endpoints = network.endpoints
     private val changed = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
@@ -90,7 +92,8 @@ class CameraController private constructor(private val context: Context) {
     private var identity = ""
     private val browser = CameraCatalogBrowser(context, scope, requests, ::browseSession, ::catalogProgress) { changed.emit(Unit) }
     private val locationWrites = Mutex()
-    private var locationTarget: Pair<Boolean, Int>? = null
+    private var locationTarget: CameraLocationChannel? = null
+    @Volatile private var sonyLocationStopped = false
     private val automatic: CameraAutomation = CameraAutomation(context, scope, settings, object : AutomaticTransferHost {
         override val camera = state
         override val ble = this@CameraController.ble
@@ -194,6 +197,7 @@ class CameraController private constructor(private val context: Context) {
 
     @Synchronized
     private fun startWifiConnection(initialPhase: ConnectionPhase, prepare: suspend ((ConnectionPhase, String) -> Unit) -> WifiPlan) {
+        sonyLocationStopped = false
         CameraService.start(context)
         preferWifi()
         disconnectWifi()
@@ -357,6 +361,7 @@ class CameraController private constructor(private val context: Context) {
                 synchronized(this@CameraController) {
                     if (generation != connectionGeneration) return@launch
                     settings.update { it.copy(sonySelected = true, sonyAddress = camera.address, sonyName = camera.name) }
+                    sonyLocationStopped = false
                     mutableState.update { it.copy(connecting = false, busy = false, connectionPhase = ConnectionPhase.IDLE,
                         stage = "索尼相机已配对，可以导入照片", message = null) }
                 }
@@ -513,6 +518,7 @@ class CameraController private constructor(private val context: Context) {
     fun pairedDevices(): List<BleCamera> = ble.pairedDevices()
     @Synchronized
     fun disconnectControl() {
+        sonyLocationStopped = true
         sony.close()
         automatic.allowStandbyReconnect(false)
         manualBluetoothJob?.cancel()
@@ -595,31 +601,99 @@ class CameraController private constructor(private val context: Context) {
         automatic.allowStandbyReconnect(true)
     }
 
-    fun canSyncLocation(): Boolean = (link?.connected == true && link?.supportsLocation() == true) || ble.locationSession() != null
-    fun locationRequested(): Boolean = (link?.connected == true && link?.supportsLocation() == true) || ble.state.value.locationRequested
+    fun resumeLocationSync() {
+        sonyLocationStopped = false
+        mutableState.update { it.copy(manuallyDisconnected = false) }
+    }
 
-    suspend fun syncLocation(payload: ByteArray): String = locationWrites.withLock {
-        val bleSession = ble.locationSession()
-        if (bleSession != null) {
-            ble.updateLocation(payload, bleSession)
-            locationTarget = false to bleSession
-            "BLE"
-        } else requests.withLock {
-            val session = active()
-            session.updateLocation(payload)
-            locationTarget = true to connectionGeneration
-            "Wi-Fi"
+    internal suspend fun prepareLocation(owner: Any, resume: Boolean): CameraLocationChannel? = locationWrites.withLock {
+        val previous = locationTarget
+        if (previous != null && previous.owner === owner && previous.isCurrent()) {
+            previous.prepare(resume)
+            return@withLock previous
         }
+        locationTarget = null
+        previous?.clear()
+        val selected = settings.state.value
+        fun selectionCurrent(): Boolean {
+            val latest = settings.state.value
+            if (!latest.locationSync || state.value.manuallyDisconnected || (latest.sonySelected && sonyLocationStopped)) return false
+            return latest.sonySelected == selected.sonySelected && latest.selectedAddress == selected.selectedAddress
+        }
+        if (!selectionCurrent()) return@withLock null
+        val channel = if (selected.sonySelected) {
+            check(selected.sonyAddress.isNotBlank()) { "请先添加索尼相机" }
+            // Opening the location service only uses bonded BLE; it never requests a hotspot or a Wi-Fi session.
+            val session = sony.location(selected.sonyAddress)
+            object : CameraLocationChannel(owner, sony = true) {
+                override fun isCurrent() = selectionCurrent() && this@CameraController.sony.isCurrent(session)
+                override fun requested() = !session.locationSync.paused
+                override suspend fun prepare(resume: Boolean) = session.locationSync.prepare(resume)
+                override suspend fun send(fix: CameraLocationFix): String {
+                    session.locationSync.send(fix, ::isCurrent)
+                    return "索尼蓝牙"
+                }
+                override suspend fun clear() = session.locationSync.stop()
+            }
+        } else {
+            val bleSession = ble.locationSession()
+            val wifiSession = link
+            val generation = connectionGeneration
+            if (bleSession != null && ble.state.value.connectedAddress == selected.controlAddress) {
+                object : CameraLocationChannel(owner) {
+                    private var sent = false
+                    override fun isCurrent() = selectionCurrent() && ble.locationSession() == bleSession
+                    override fun requested() = ble.state.value.locationRequested
+                    override suspend fun send(fix: CameraLocationFix): String {
+                        sent = true
+                        ble.updateLocation(locationPayload(fix), bleSession)
+                        return "BLE"
+                    }
+                    override suspend fun clear() {
+                        if (sent && ble.locationSession() == bleSession) ble.updateLocation(locationPayload(null), bleSession)
+                        sent = false
+                    }
+                }
+            } else if (wifiSession?.connected == true && wifiSession.supportsLocation()) {
+                object : CameraLocationChannel(owner) {
+                    private var sent = false
+                    private fun sameSession() = link === wifiSession && connectionGeneration == generation && wifiSession.connected
+                    override fun isCurrent() = selectionCurrent() && sameSession()
+                    override fun requested() = true
+                    override suspend fun send(fix: CameraLocationFix): String = requests.withLock {
+                        check(isCurrent()) { "相机会话已更换" }
+                        sent = true
+                        wifiSession.updateLocation(locationPayload(fix))
+                        "Wi-Fi"
+                    }
+                    override suspend fun clear() = requests.withLock {
+                        if (sent && sameSession()) wifiSession.updateLocation(locationPayload(null))
+                        sent = false
+                    }
+                }
+            } else return@withLock null
+        }
+        locationTarget = channel
+        check(channel.isCurrent()) { "位置同步目标已变化" }
+        channel.prepare(resume)
+        channel
     }
 
-    suspend fun clearLocation() = locationWrites.withLock {
-        val target = locationTarget ?: return@withLock
-        val payload = NativePtp.location(0.0, 0.0, Double.NaN, 0, 0, false)
-        if (target.first) requests.withLock {
-            if (target.second == connectionGeneration && link?.connected == true) active().updateLocation(payload)
-        } else if (ble.locationSession() == target.second) ble.updateLocation(payload, target.second)
-        locationTarget = null
+    internal suspend fun syncLocation(channel: CameraLocationChannel, fix: CameraLocationFix): String = locationWrites.withLock {
+        check(locationTarget === channel && channel.isCurrent()) { "位置同步目标已变化" }
+        check(fix.fresh(SystemClock.elapsedRealtimeNanos(), channel.maxAgeNanos)) { "定位已过期，等待新的位置" }
+        channel.send(fix)
     }
+
+    internal suspend fun clearLocation(owner: Any) = locationWrites.withLock {
+        val target = locationTarget?.takeIf { it.owner === owner } ?: return@withLock
+        locationTarget = null
+        target.clear()
+    }
+
+    private fun locationPayload(fix: CameraLocationFix?): ByteArray = if (fix == null) {
+        NativePtp.location(0.0, 0.0, Double.NaN, 0, 0, false)
+    } else NativePtp.location(fix.latitude, fix.longitude, fix.altitude, fix.timeMillis, 0, true)
 
     fun beginRegistration() {
         scope.launch {

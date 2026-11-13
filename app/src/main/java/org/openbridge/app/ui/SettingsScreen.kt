@@ -57,7 +57,7 @@ fun SettingsScreen(state: LibraryUiState, actions: LibraryActions, onCamera: () 
                     SettingsSection.DEVICES -> settings.selectedName.ifBlank { "未添加" }
                     SettingsSection.AUTO -> if (settings.automaticEnabled) autoKind.label() else "关闭"
                     SettingsSection.IMPORT -> settings.effectiveManualVariant.label()
-                    SettingsSection.LOCATION -> if (settings.sonySelected) "暂未适配" else if (settings.locationSync) "开启" else "关闭"
+                    SettingsSection.LOCATION -> if (settings.locationSync) "开启" else "关闭"
                     SettingsSection.POWER -> settings.powerProfile.label()
                 }
                 SettingsRow(option.title, value) { section = option }
@@ -103,21 +103,22 @@ fun SettingsScreen(state: LibraryUiState, actions: LibraryActions, onCamera: () 
                     ImportHistoryControl(state, actions.onClearImportHistory)
                 }
                 SettingsSection.LOCATION -> {
-                    if (settings.sonySelected) {
-                        Text("索尼机身的位置同步暂未适配。")
-                        return@BridgeSheet
-                    }
                     SettingSwitch("使用手机位置", settings.locationSync, actions.onSetLocationSync)
                     Text("仅用于之后拍摄的照片。", style = MaterialTheme.typography.bodySmall)
+                    if (settings.sonySelected) {
+                        Text("通过蓝牙同步，无需连接 Wi-Fi。请先关闭其他手机或 Creators’ App 的位置关联。",
+                            style = MaterialTheme.typography.bodySmall)
+                    }
                     Text(state.location.message)
                     if (settings.locationSync) TextButton(onClick = { actions.onSetLocationSync(true) }) {
-                        Text(if (state.location.running) "立即同步" else "恢复同步")
+                        Text(if (settings.sonySelected || !state.location.running) "恢复同步" else "立即同步")
                     }
                 }
                 SettingsSection.POWER -> {
                     val profile = settings.powerProfile
                     ChoiceRow(PowerProfile.entries, profile, PowerProfile::label, actions.onSetPowerProfile)
-                    Text("检查间隔约 ${profile.pollSeconds} 秒 · 定位间隔约 ${profile.locationSeconds} 秒",
+                    val locationSeconds = if (settings.sonySelected) 10 else profile.locationSeconds
+                    Text("检查间隔约 ${profile.pollSeconds} 秒 · 定位间隔约 $locationSeconds 秒",
                         style = MaterialTheme.typography.bodySmall)
                     TextButton(onClick = actions.onOpenAppSettings) { Text("系统权限与电池管理") }
                 }
