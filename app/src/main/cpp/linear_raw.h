@@ -89,12 +89,15 @@ class LinearRaster {
     Check(open(), "Open linear RAW");
     const auto& s = data.sizes;
     if (!s.width || !s.height || uint64_t{s.raw_width} * s.raw_height > 100000000) throw std::runtime_error("RAW exceeds processing limit");
+    CheckMemoryBudget(max_edge, memory_budget);
+    Check(decoder_->unpack(), "Unpack linear RAW");
+    // Apply the file's standard crop after unpack() has calculated black levels, before either preview or full development.
+    // The return value is a crop index plus one (0 means no valid crop), not a LibRaw error code.
+    decoder_->adjust_to_raw_inset_crop(1);
     source_width = s.flip & 4 ? s.height : s.width;
     source_height = s.flip & 4 ? s.width : s.height;
     if (!max_edge && int64_t{s.width} * s.height > budget) throw std::runtime_error("RAW output exceeds memory budget");
     p.half_size = mode == RawDecodeSize::Preview && max_edge > 0 && std::max(s.width, s.height) >= int64_t{max_edge} * 2;
-    CheckMemoryBudget(max_edge, memory_budget);
-    Check(decoder_->unpack(), "Unpack linear RAW");
     Check(decoder_->dcraw_process(), "Develop camera RGB");
     if (!data.image || data.idata.colors != 3 || !s.width || !s.height) throw std::runtime_error("Expected three camera channels");
     // After dcraw_process these are the developed image dimensions, also used as the stride by copy_mem_image.
@@ -117,7 +120,7 @@ class LinearRaster {
     const double scale = max_edge ? std::min(1., double(max_edge) / std::max(s.width, s.height)) : 1.;
     const int64_t output_pixels = std::max(1L, std::lround(s.width * scale)) * int64_t{std::max(1L, std::lround(s.height * scale))};
     // Budget raw storage (up to four 16-bit channels), the developed raster and one RGBA_8888 output together.
-    // Export demosaics the entire sensor even for a smaller output; reserve scratch space for LibRaw, LUTs and encoding.
+    // Even resized exports demosaic the full default crop; reserve scratch space for LibRaw, LUTs and encoding.
     const int64_t required = raw_pixels * 8 + std::max(raw_pixels, image_pixels) * 8 + output_pixels * 4 + 64 * 1024 * 1024;
     if (required > memory_budget) throw std::runtime_error("可用内存不足，无法以当前尺寸显影 RAW，请关闭其他应用后重试");
   }
