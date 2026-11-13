@@ -39,10 +39,10 @@ internal class PtpTransport(
         val session = ssh ?: authenticate(access)
         val channel = session.getStreamForwarder("localhost", port)
         val timeout = object : AsyncTimeout() { override fun timedOut() { this@PtpTransport.close() } }
-        timeout.timeout(TIMEOUT_MS.toLong(), TimeUnit.MILLISECONDS)
+        timeout.timeout(READ_TIMEOUT_MS.toLong(), TimeUnit.MILLISECONDS)
         val input = timeout.source(channel.inputStream.source()).buffer().inputStream()
         val output = channel.outputStream
-        channel.connect(TIMEOUT_MS)
+        channel.connect(CONNECT_TIMEOUT_MS)
         return PtpPipe(input, output) { timeout.clearTimeout() }
     }
 
@@ -52,9 +52,9 @@ internal class PtpTransport(
             (network?.socketFactory?.createSocket() ?: Socket()).also(sockets::add)
         }
         val address = network?.getAllByName(host)?.firstOrNull()
-        socket.soTimeout = TIMEOUT_MS
+        socket.soTimeout = READ_TIMEOUT_MS
         socket.tcpNoDelay = true
-        socket.connect(if (address == null) InetSocketAddress(host, destination) else InetSocketAddress(address, destination), TIMEOUT_MS)
+        socket.connect(if (address == null) InetSocketAddress(host, destination) else InetSocketAddress(address, destination), CONNECT_TIMEOUT_MS)
         return socket
     }
 
@@ -92,7 +92,7 @@ internal class PtpTransport(
                                                    prompt: Array<out String>, echo: BooleanArray): Array<String>? =
                 if (prompt.size == 1 && echo.contentEquals(booleanArrayOf(false))) arrayOf(credentials.password) else null
         }
-        try { session.connect(TIMEOUT_MS) }
+        try { session.connect(CONNECT_TIMEOUT_MS) }
         catch (failure: com.jcraft.jsch.JSchException) {
             throw java.io.IOException("索尼访问认证失败，请核对机身指纹、配对和访问认证信息", failure)
         }
@@ -110,5 +110,8 @@ internal class PtpTransport(
         session?.disconnect()
     }
 
-    private companion object { const val TIMEOUT_MS = 15_000 }
+    private companion object {
+        const val CONNECT_TIMEOUT_MS = 15_000
+        const val READ_TIMEOUT_MS = 30_000 // Match the official PTP request allowance; connection/authentication have their own budget.
+    }
 }

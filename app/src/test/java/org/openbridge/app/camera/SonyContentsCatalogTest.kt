@@ -62,6 +62,13 @@ class SonyContentsCatalogTest {
         }
     }
 
+    @Test fun aReadableCardWithNoPhotosHasAnEmptyCatalog() {
+        val card = Card(mapOf(1 to emptyList())) { _, _ -> error("No page request is needed for an empty card") }
+        val cursor = SonyContentsCatalog(card::read) { listOf(1) }.cursor()
+        assertTrue(cursor.dates.isEmpty())
+        assertFalse(cursor.hasMore)
+    }
+
     @Test fun jumpStartsAtTheExactDateAndSlotThenContinuesInTheChosenDirection() {
         val card = Card(slots) { _, _ -> emptyList() }
         val catalog = SonyContentsCatalog(card::read) { listOf(1, 2) }

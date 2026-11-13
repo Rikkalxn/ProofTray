@@ -19,6 +19,7 @@ internal const val SONY_DATES = 0x923b
 internal const val SONY_LIST = 0x923c
 internal const val SONY_FILE = 0x923d
 internal const val SONY_PREVIEW = 0x923e
+internal const val SONY_CONTENTS_CHANGED = 0xc234
 internal const val SONY_CHUNK = 3 * 1024 * 1024
 internal const val SONY_THUMB_PROP = 0xd8b1
 internal const val SONY_SCREEN_PROP = 0xd8b0
@@ -94,21 +95,45 @@ internal fun sonyExtendedProperties(bytes: ByteArray): Set<Int> {
     require(b.remaining() >= 10) { "索尼扩展能力描述不完整" }
     b.short // protocol version
     val count = b.length((b.remaining() - 8) / 2)
-    return buildSet { repeat(count) { add(b.short.toInt() and 0xffff) } }
+    val properties = buildSet { repeat(count) { add(b.short.toInt() and 0xffff) } }
+    val controls = b.length((b.remaining() - 4) / 2)
+    b.skipBytes(controls * 2)
+    return properties
 }
 
-internal data class SonyScalar(val enabled: Int, val value: Long)
+internal data class SonyScalar(val enabled: Int, val value: Long) {
+    // ContentsInfoListEnableStatus uses wire value 1 in the low byte; 3 is the official client's internal enum index.
+    val contentsReadable: Boolean get() = enabled in 1..2 && (value and 0xffL) == 1L
+    val supportsFileSizeReport: Boolean get() = enabled == 1 && (value and 0xffff_ffffL).toInt() >= 101
+}
 
 internal fun sonyScalar(bytes: ByteArray, code: Int): SonyScalar? {
     val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
     require(b.remaining() >= 6 && (b.short.toInt() and 0xffff) == code) { "索尼属性描述不匹配" }
-    val width = when (b.short.toInt()) { 1, 2 -> 1; 3, 4 -> 2; 5, 6 -> 4; 7, 8 -> 8; else -> return null }
+    val type = b.short.toInt() and 0xffff
+    val width = when (type) { 1, 2 -> 1; 3, 4 -> 2; 5, 6 -> 4; 7, 8 -> 8; else -> return null }
     b.get() // writable
-    val enabled = b.get().toInt()
+    val enabled = b.get().toInt() and 255
     b.skipBytes(width) // default value precedes the current value
     require(b.remaining() >= width) { "索尼属性值不完整" }
-    val value = when (width) { 1 -> b.get().toLong() and 255; 2 -> b.short.toLong() and 0xffff; 4 -> b.u32(); else -> b.long }
+    val value = when (type) {
+        1 -> b.get().toLong(); 2 -> b.get().toLong() and 255
+        3 -> b.short.toLong(); 4 -> b.short.toLong() and 0xffff
+        5 -> b.int.toLong(); 6 -> b.u32()
+        else -> b.long
+    }
     return SonyScalar(enabled, value)
+}
+
+internal fun validateSonyReadMetadata(params: LongArray, expectedSize: Long, previousStamp: Long, reportSize: Boolean): Long? {
+    if (params.size < 2) return null
+    fun longParam(index: Int) = params[index] or (params[index + 1] shl 32)
+    val stamp = longParam(0)
+    // A first-chunk size report validates the expected size; later replies validate the previous modification timestamp.
+    if (reportSize && params.size >= 4) {
+        check(longParam(2) == expectedSize) { "机身文件大小已变化，请刷新后重新选择原片" }
+    } else check(previousStamp <= 0 || stamp <= previousStamp) { "传输期间机身上的文件已修改，请刷新后重新选择原片" }
+    return stamp.takeIf { it > 0 }
 }
 
 internal fun sonyDates(data: ByteArray): List<Long> {

@@ -95,9 +95,12 @@ internal class PtpLink(
                         if (kind == 13) { events.output.write(packet(14)); events.output.flush() }
                         if (kind == 8 && payload.size >= 6) {
                             val code = (payload[0].toInt() and 255) or ((payload[1].toInt() and 255) shl 8)
-                            if (code in setOf(0x4004, 0x4005, 0x400b)) catalogRevision++
+                            val sonyChanged = make == CameraMake.SONY && code == SONY_CONTENTS_CHANGED
+                            if (code in setOf(0x4004, 0x4005, 0x400b) || sonyChanged) catalogRevision++
                             if (code in setOf(0x4002, 0x4003, 0x4004, 0x4005, 0x400b, 0x400d, 0xc101, 0xc102)) catalogSignals.trySend(Unit)
-                            if (make == CameraMake.SONY && code in setOf(0xc201, 0xc202, 0xc20d)) catalogSignals.trySend(Unit)
+                            if (make == CameraMake.SONY && code in setOf(0xc201, 0xc202, 0xc203, 0xc20d, SONY_CONTENTS_CHANGED)) {
+                                catalogSignals.trySend(Unit)
+                            }
                         }
                     }
                 } catch (error: Exception) {
@@ -118,6 +121,8 @@ internal class PtpLink(
     }
 
     private fun openSonyImport() {
+        // GetDeviceInfo used transaction 0. Sony keeps incrementing through descriptions and session opening, without a reset.
+        transaction = 1
         // Both device descriptions are read before choosing a function mode, as in the Creators' App initializer.
         val description = if (0x923a in operations) {
             val dd = sonyDescription(data(0x923a, longArrayOf(1), 1024 * 1024L))
@@ -128,7 +133,6 @@ internal class PtpLink(
         check(!contentsMode || !description.transfer.equals("Disable", true)) { "机身当前未开放照片传输，请检查智能手机连接设置" }
         if (contentsMode || 0x9210 in operations) transact(0x9210, longArrayOf(1, if (contentsMode) 2 else 1), false, null, 0)
         else transact(0x1002, longArrayOf(1), false, null, 0)
-        transaction = 1
         if (0x9201 in operations && 0x9202 in operations) {
             fun connectPhase(phase: Long) {
                 transact(0x9201, longArrayOf(phase, 0, 0), false, ByteArrayOutputStream(), 64 * 1024L)
@@ -140,7 +144,7 @@ internal class PtpLink(
             val parameters = if (version >= 310) longArrayOf(300, 1) else longArrayOf(300)
             for (attempt in 1..20) {
                 val ext = data(0x9202, parameters)
-                if (ext.size > 10) { sonyProperties = sonyExtendedProperties(ext); break }
+                if (ext.size >= 10) { sonyProperties = sonyExtendedProperties(ext); break }
                 check(attempt < 20) { "索尼相机尚未准备好传输，请退出机身菜单后重试" }
                 Thread.sleep(100)
             }
@@ -148,7 +152,7 @@ internal class PtpLink(
         }
         Log.i("OpenBridgeCamera", "Sony import: server=${description.server} catalog=${if (contentsMode) "contents" else "MTP"}")
         if (contentsMode) {
-            sonyReportSize = sonyProperty(0xe116)?.let { it.enabled == 1 && it.value >= 101 } == true
+            sonyReportSize = sonyProperty(0xe116)?.supportsFileSizeReport == true
             sonyContents = SonyContentsCatalog({ op, params -> data(op, params) }, ::sonySlots)
             return
         }
@@ -182,10 +186,16 @@ internal class PtpLink(
 
     private fun sonySlots(): List<Int> {
         val advertised = (1..2).filter { 0xd1d3 + it in sonyProperties }
-        return advertised.ifEmpty { listOf(1, 2) }.filter { slot ->
-            val state = sonyProperty(0xd1d3 + slot)
-            state == null || (state.enabled in 1..2 && state.value == 3L)
+        val states = advertised.ifEmpty { listOf(1, 2) }.map { slot -> slot to sonyProperty(0xd1d3 + slot) }
+        val readable = states.filter { (_, state) -> state == null || state.contentsReadable }.map { it.first }
+        if (readable.isEmpty()) {
+            val detail = "Sony 卡槽状态：" + states.joinToString { (slot, state) ->
+                "slot=$slot enabled=${state?.enabled} value=0x${state?.value?.toString(16)}"
+            }
+            Log.i("OpenBridgeCamera", detail)
+            diagnostic(detail)
         }
+        return readable
     }
 
     fun sonyCatalogCursor(storage: Long? = null, direction: CatalogDirection = CatalogDirection.NEWEST,
@@ -368,14 +378,7 @@ internal class PtpLink(
         val args = file.ref.chunk(offset, count, reportSize)
         var metadata = longArrayOf()
         val received = transact(SONY_FILE, args, true, destination, count.toLong(), onResponse = { metadata = it })
-        fun longParam(index: Int) = metadata[index] or (metadata[index + 1] shl 32)
-        if (metadata.size >= 2) {
-            val updated = longParam(0)
-            val reference = sonyReadStamp ?: file.modifiedUtc
-            check(reference <= 0 || updated <= reference) { "传输期间机身上的文件已修改，请刷新后重新选择原片" }
-            if (updated > 0) sonyReadStamp = updated
-        }
-        if (reportSize && metadata.size >= 4) check(longParam(2) == file.size) { "机身文件大小已变化，请刷新后重新选择原片" }
+        validateSonyReadMetadata(metadata, file.size, sonyReadStamp ?: file.modifiedUtc, reportSize)?.let { sonyReadStamp = it }
         if (offset + received == file.size) {
             try {
                 finishSonyPayload(offset + received, file.size) {
@@ -477,7 +480,7 @@ internal class PtpLink(
                         val code = (response[0].toInt() and 255) or ((response[1].toInt() and 255) shl 8)
                         if (tracePreview) Log.i("OpenBridgePreview", "wire op=0x${operation.toString(16)} response=0x${code.toString(16)}")
                         if (code != 0x2001) {
-                            val detail = "PTP/IP　0x${operation.toString(16)} → 0x${code.toString(16)}"
+                            val detail = "PTP/IP　0x${operation.toString(16)} → 0x${code.toString(16)} · tid=$id"
                             Log.w("OpenBridgeCamera", detail)
                             diagnostic(detail)
                             throw PtpResponseException(operation, code, received)
@@ -496,7 +499,7 @@ internal class PtpLink(
             closeWithCause(cancelled)
             throw cancelled
         } catch (error: Exception) {
-            val detail = "PTP/IP 0x${operation.toString(16)} stage=$lastType bytes=$received/$declared end=$ended"
+            val detail = "PTP/IP 0x${operation.toString(16)} tid=$id stage=$lastType bytes=$received/$declared end=$ended"
             Log.w("OpenBridgeCamera", detail, error)
             diagnostic(detail)
             val message = if (error.message.orEmpty().contains("ENOSPC")) "手机空间不足，请腾出空间后重试"

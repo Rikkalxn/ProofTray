@@ -56,7 +56,7 @@ internal class SonyContentsCatalog(private val read: (Int, LongArray) -> ByteArr
             readable = true
             dates += values.map { SonyCaptureDay(slot, it) }
         }
-        check(readable || onlySlot != null) { "机身尚无可读取的存储卡，请检查卡槽后刷新" }
+        check(readable || onlySlot != null) { "相机照片目录暂不可读，请等待机身完成存储卡准备后刷新" }
         return Cursor(orderedSonyDates(dates, direction), startAt)
     }
 

@@ -16,8 +16,8 @@ android {
         applicationId = "org.openbridge.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 38
-        versionName = "0.9.9"
+        versionCode = 39
+        versionName = "0.9.10"
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
