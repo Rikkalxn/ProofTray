@@ -64,8 +64,12 @@ class LinearRaster {
 
   const libraw_data_t& data() const { return decoder_->imgdata; }
   float displayBaselineExposure() const {
-    const auto& levels = decoder_->imgdata.color.dng_levels;
-    return decoder_->imgdata.idata.dng_version && (levels.parsedfields & LIBRAW_DNGFM_BASELINEEXPOSURE) ? levels.baseline_exposure : 0.f;
+    const auto& data = decoder_->imgdata;
+    if (!data.idata.dng_version) return 0.f;
+    // LibRaw promotes the IFD exposure value without its parsedfields bit; missing tags retain the -999 sentinel.
+    const float exposure = data.color.dng_levels.baseline_exposure;
+    if (exposure == -999.f || !std::isfinite(exposure) || std::abs(exposure) > 16.f) return 0.f;
+    return exposure;
   }
   int width = 0, height = 0;
   int source_width = 0, source_height = 0;
