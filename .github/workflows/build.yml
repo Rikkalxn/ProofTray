@@ -39,23 +39,23 @@ jobs:
           "platform-tools" "platforms;android-36" "build-tools;36.0.0"
           "ndk;28.2.13676358" "cmake;3.22.1"
 
-      - name: Build Debug APK
-        run: ./gradlew --no-daemon --stacktrace :app:assembleDebug
+      - name: Build Debug APK and run JVM tests
+        run: ./gradlew --no-daemon --stacktrace :app:assembleDebug :app:testDebugUnitTest
 
-      - name: Run JVM tests
-        run: ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest
-
-      - name: Collect APK and license notices
+      - name: Collect APK, bundled notices and corresponding source
+        shell: bash
         run: |
-          mkdir -p dist/ci
-          cp app/build/outputs/apk/debug/app-debug.apk dist/ci/OpenBridge-debug.apk
-          cp LICENSE THIRD_PARTY_NOTICES.md dist/ci/
-          cp third_party/furble/LICENSE dist/ci/furble-MIT.txt
+          mkdir -p dist/ci/licenses
+          apk=dist/ci/ProofTray-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk "$apk"
+          unzip -jq "$apk" 'assets/licenses/*' -d dist/ci/licenses
+          git ls-files --recurse-submodules -z |
+            tar --create --gzip --file=dist/ci/ProofTray-source.tar.gz --no-recursion --null --files-from=-
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: OpenBridge-debug-${{ github.run_number }}
+          name: ProofTray-debug-${{ github.run_number }}
           path: dist/ci/
           if-no-files-found: error
           retention-days: 14
@@ -72,7 +72,7 @@ jobs:
           retention-days: 14
 
   core:
-    name: C++ core tests
+    name: C++ core and Log TIFF tests
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -80,16 +80,20 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-          submodules: recursive
+
+      - name: Check out the TIFF dependency
+        run: git submodule update --init -- third_party/libtiff/upstream
 
       - name: Configure C++ core
-        run: cmake -S core -B out/build/ci-core -G Ninja -DCMAKE_BUILD_TYPE=Debug -DOPENBRIDGE_BUILD_TESTS=ON
+        run: >-
+          cmake -S . -B out/build/ci-core -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DOPENBRIDGE_BUILD_TESTS=ON -DOPENBRIDGE_BUILD_TIFF_TESTS=ON
 
       - name: Build C++ core
         run: cmake --build out/build/ci-core --parallel 2
 
       - name: Run C++ tests
-        run: ctest --test-dir out/build/ci-core --output-on-failure --output-junit test-results.xml
+        run: ctest --test-dir out/build/ci-core --no-tests=error --output-on-failure --output-junit test-results.xml
 
       - name: Upload C++ test reports
         if: ${{ !cancelled() }}

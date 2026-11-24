@@ -1,6 +1,6 @@
-#include "openbridge/color_lut.h"
-#include "openbridge/raw_exposure.h"
-#include "openbridge/raw_rendering.h"
+#include "prooftray/color_lut.h"
+#include "prooftray/raw_exposure.h"
+#include "prooftray/raw_rendering.h"
 
 #include <algorithm>
 #include <array>
@@ -10,7 +10,7 @@
 #include <stdexcept>
 
 namespace {
-using namespace openbridge;
+using namespace prooftray;
 
 void Check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 void Near(const Rgb& a, const Rgb& b, float tolerance = 1e-5f) {

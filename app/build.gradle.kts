@@ -6,13 +6,26 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+abstract class CollectLicenseAssets : Sync() {
+    @get:OutputDirectory abstract val assetDirectory: DirectoryProperty
+
+    fun notice(source: Any, assetName: String) {
+        inputs.file(source).withPathSensitivity(PathSensitivity.RELATIVE)
+        from(source) {
+            into("licenses")
+            rename { assetName }
+        }
+    }
+}
+
 android {
-    namespace = "org.openbridge.app"
+    namespace = "org.prooftray.app"
     compileSdk = 36
     buildToolsVersion = "36.0.0"
     ndkVersion = "28.2.13676358"
 
     defaultConfig {
+        // Installed identity owns the photo database, URI grants and camera pairing preferences.
         applicationId = "org.openbridge.app"
         minSdk = 29
         targetSdk = 36
@@ -49,6 +62,27 @@ android {
             version = "3.22.1"
         }
     }
+}
+
+androidComponents.onVariants { variant ->
+    val root = rootProject.layout.projectDirectory
+    val ndkNotice = androidComponents.sdkComponents.ndkDirectory.map { it.file("NOTICE.toolchain") }
+    val task = tasks.register<CollectLicenseAssets>("collect${variant.name.replaceFirstChar { it.uppercaseChar() }}LicenseAssets") {
+        into(assetDirectory)
+        notice(root.file("LICENSE"), "ProofTray-Apache-2.0.txt")
+        notice(root.file("THIRD_PARTY_NOTICES.md"), "THIRD_PARTY_NOTICES.md")
+        notice(root.file("third_party/furble/LICENSE"), "furble-MIT.txt")
+        for (name in listOf("COPYRIGHT", "LICENSE.LGPL", "LICENSE.CDDL")) {
+            notice(root.file("third_party/libraw/upstream/$name"), "LibRaw-$name.txt")
+        }
+        notice(root.file("third_party/libtiff/upstream/LICENSE.md"), "libtiff-LICENSE.md")
+        notice(ndkNotice, "Android-NDK-NOTICE.txt")
+        from(root.dir("licenses")) {
+            include("*.txt")
+            into("licenses")
+        }
+    }
+    variant.sources.assets?.addGeneratedSourceDirectory(task, CollectLicenseAssets::assetDirectory)
 }
 
 kotlin {

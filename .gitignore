@@ -28,14 +28,11 @@ AGENT.md
 .agents/
 .codex/
 
-# Local setup helpers and historical handoff records (kept on disk).
-/tools/setup-android.ps1
-/tools/setup-jdk.ps1
-/tools/setup-native.ps1
-/tools/open-android-studio.ps1
-/tools/package-handoff.ps1
-/docs/HANDOFF.md
-/docs/verification-*.md
+# Local maintainer scripts, notes, artwork and camera samples.
+/tools/
+/docs/
+/design/
+/neftest/
 
 # Release artifacts, local credentials and device captures.
 *.apk
@@ -45,7 +42,3 @@ AGENT.md
 .env
 .env.*
 !.env.example
-docs
-tools
-design
-neftest

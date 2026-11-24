@@ -1,4 +1,4 @@
-#include "openbridge/catalog.h"
+#include "prooftray/catalog.h"
 
 #include <algorithm>
 #include <cmath>
@@ -11,7 +11,7 @@
 #include <type_traits>
 #include <utility>
 
-namespace openbridge {
+namespace prooftray {
 namespace {
 
 std::string FoldAscii(std::string value) {
@@ -250,4 +250,4 @@ CatalogResult QueryCatalog(const std::vector<PhotoAsset>& assets, const CatalogF
   return result;
 }
 
-}  // namespace openbridge
+}  // namespace prooftray

@@ -1,6 +1,6 @@
 // Nikon smart-device hash adapted from gkoh/furble (MIT, Copyright 2020 Guo-Rong Koh).
 // See third_party/furble/LICENSE. Official application code is not included.
-#include "openbridge/nikon_pairing.h"
+#include "prooftray/nikon_pairing.h"
 
 #include <array>
 #include <algorithm>
@@ -8,7 +8,7 @@
 
 #include "Blowfish.h"
 
-namespace openbridge {
+namespace prooftray {
 namespace {
 constexpr std::array<std::array<uint32_t, 2>, 8> kSalts{{
     {0x704066e4, 0x0433d552}, {0xed4b8fac, 0x15f7e47b}, {0x24471f11, 0x8b5ea1fc}, {0x05960c31, 0x2b8c7f41},
@@ -120,4 +120,4 @@ std::vector<uint8_t> NikonDecryptConnectionField(std::span<const uint8_t> key, s
   }
   return plaintext;
 }
-}  // namespace openbridge
+}  // namespace prooftray

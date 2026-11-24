@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace openbridge::jni {
+namespace prooftray::jni {
 
 // Preserve a pending JVM exception, especially allocation failures raised while crossing JNI.
 inline void ThrowJava(JNIEnv* env, const char* type, const char* message) {
@@ -46,4 +46,4 @@ inline jbyteArray ByteArray(JNIEnv* env, std::span<const uint8_t> bytes) {
   return result;
 }
 
-}  // namespace openbridge::jni
+}  // namespace prooftray::jni

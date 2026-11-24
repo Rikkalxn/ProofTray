@@ -1,4 +1,4 @@
-#include "openbridge/color_lut.h"
+#include "prooftray/color_lut.h"
 
 #include <algorithm>
 #include <bit>
@@ -10,7 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 
-namespace openbridge {
+namespace prooftray {
 namespace {
 
 constexpr float kMaxLutMagnitude = 65504.0f;
@@ -154,7 +154,7 @@ std::vector<uint8_t> SerializeLut(const ColorLut& lut) {
 
 ColorLut ParseLutBinary(std::span<const uint8_t> bytes) {
   const std::array<uint8_t, 8> magic{'O', 'B', 'L', 'U', 'T', '1', 0, 0};
-  if (bytes.size() < 40 || !std::equal(magic.begin(), magic.end(), bytes.begin())) throw std::invalid_argument("Invalid OpenBridge LUT header");
+  if (bytes.size() < 40 || !std::equal(magic.begin(), magic.end(), bytes.begin())) throw std::invalid_argument("Invalid ProofTray LUT header");
   size_t offset = 8;
   auto word = [&]() {
     if (bytes.size() - offset < 4) throw std::invalid_argument("Truncated LUT data");
@@ -329,4 +329,4 @@ void ApplyColorLookRgba(std::span<uint8_t> pixels, size_t width, size_t height, 
   }
 }
 
-}  // namespace openbridge
+}  // namespace prooftray

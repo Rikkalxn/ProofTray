@@ -1,11 +1,11 @@
-#include "openbridge/log_encoding.h"
+#include "prooftray/log_encoding.h"
 
 #include <algorithm>
 #include <cmath>
 #include <numbers>
 #include <stdexcept>
 
-namespace openbridge {
+namespace prooftray {
 namespace {
 using Vector = std::array<double, 3>;
 using Matrix = std::array<Vector, 3>;
@@ -204,4 +204,4 @@ Rgb RenderNLogReference(const Rgb& linear_srgb, const ColorLut& lut, LogRange ra
   const float gain = k * std::exp2(exposure_ev);
   return RenderLogPixel(linear_srgb, lut, {spec, range, {gain, gain, gain}, strength, 0.f, 1.f});
 }
-}  // namespace openbridge
+}  // namespace prooftray

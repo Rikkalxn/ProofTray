@@ -4,7 +4,7 @@
   "configurePresets": [
     {
       "name": "core-debug",
-      "displayName": "OpenBridge C++ core",
+      "displayName": "ProofTray C++ core",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/../out/build/clion-core-debug",
       "cacheVariables": {
@@ -14,6 +14,6 @@
       }
     }
   ],
-  "buildPresets": [{ "name": "core-debug", "configurePreset": "core-debug", "targets": ["openbridge_catalog_tests"] }],
+  "buildPresets": [{ "name": "core-debug", "configurePreset": "core-debug" }],
   "testPresets": [{ "name": "core-debug", "configurePreset": "core-debug", "output": { "outputOnFailure": true } }]
 }

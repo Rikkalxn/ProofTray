@@ -24,5 +24,6 @@ git submodule update --init --recursive
 查看当前版本可运行 `git submodule status`。不要在普通构建或发布流程中使用 `git submodule update --remote`。
 独立核心测试只依赖保留在父仓库的 furble 摘取代码；Android RAW 和桌面 RAW 工具需要初始化 LibRaw。
 
-GitHub 自动生成的源码归档不展开 submodule；获取完整源码请递归克隆。
+GitHub Actions 的 Debug 产物附带 `ProofTray-source.tar.gz`，包含固定版本的 LibRaw、libtiff 和构建适配。
+也可以递归克隆仓库来获取完整源码。GitHub 标签页自动生成的源码归档省略子模块内容。
 如另行制作发布源码包，需要包含对应 LibRaw、libtiff 提交的完整源码、许可证，以及本仓库的 JNI 和构建适配文件。

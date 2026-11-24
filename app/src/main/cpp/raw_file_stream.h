@@ -1,5 +1,5 @@
-#ifndef OPENBRIDGE_RAW_FILE_STREAM_H_
-#define OPENBRIDGE_RAW_FILE_STREAM_H_
+#ifndef PROOFTRAY_RAW_FILE_STREAM_H_
+#define PROOFTRAY_RAW_FILE_STREAM_H_
 
 #include <libraw/libraw.h>
 #include <fcntl.h>
@@ -10,7 +10,7 @@
 #include <stdexcept>
 #include <system_error>
 
-namespace openbridge {
+namespace prooftray {
 
 // SAF grants access to an open descriptor, not necessarily to its path. Reuse LibRaw's buffered FILE I/O without reopening that path.
 class RawFileStream final : public LibRaw_bigfile_datastream {
@@ -37,5 +37,5 @@ class RawFileStream final : public LibRaw_bigfile_datastream {
   RawFileStream& operator=(const RawFileStream&) = delete;
 };
 
-}  // namespace openbridge
-#endif  // OPENBRIDGE_RAW_FILE_STREAM_H_
+}  // namespace prooftray
+#endif  // PROOFTRAY_RAW_FILE_STREAM_H_

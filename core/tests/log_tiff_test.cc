@@ -1,4 +1,4 @@
-#include "openbridge/log_tiff.h"
+#include "prooftray/log_tiff.h"
 
 #include <tiffio.h>
 
@@ -40,10 +40,10 @@ int Descriptor(FILE* file) {
 #endif
 }
 
-void ReadBack(openbridge::LutEncoding encoding, double gray_code) {
+void ReadBack(prooftray::LutEncoding encoding, double gray_code) {
   auto file = Temporary();
   constexpr int width = 128, height = 2;
-  openbridge::WriteLogTiff(Descriptor(file.get()), width, height, {encoding}, [](int x, int y) -> openbridge::Rgb {
+  prooftray::WriteLogTiff(Descriptor(file.get()), width, height, {encoding}, [](int x, int y) -> prooftray::Rgb {
     const float value = y == 0 ? .081f : .081f + x * .00002f;
     return {value, value, value};
   }, [] { return false; });
@@ -88,27 +88,27 @@ void ReadBack(openbridge::LutEncoding encoding, double gray_code) {
 void CancellationAndValidation() {
   auto file = Temporary();
   int polls = 0, pixels = 0;
-  Reject([&] { openbridge::WriteLogTiff(Descriptor(file.get()), 16, 4, {}, [&](int, int) -> openbridge::Rgb {
+  Reject([&] { prooftray::WriteLogTiff(Descriptor(file.get()), 16, 4, {}, [&](int, int) -> prooftray::Rgb {
     ++pixels;
     return {.081f, .081f, .081f};
   }, [&] { return ++polls == 3; }); });
   Check(pixels == 16, "Cancellation must be observed between rows");
   Check(std::fseek(file.get(), 0, SEEK_SET) == 0, "Cancellation closed the borrowed file");
-  const auto no_pixel = [](int, int) -> openbridge::Rgb { throw std::runtime_error("Unexpected pixel read"); };
-  Reject([&] { openbridge::WriteLogTiff(-1, 1, 1, {}, no_pixel, [] { return false; }); });
-  Reject([&] { openbridge::WriteLogTiff(Descriptor(file.get()), 1, 1, {openbridge::LutEncoding::Direct}, no_pixel, [] { return false; }); });
-  Reject([&] { openbridge::WriteLogTiff(Descriptor(file.get()), 1, 1, {openbridge::LutEncoding::Linear709}, no_pixel, [] { return false; }); });
-  auto invalid = openbridge::LogExportSettings{};
+  const auto no_pixel = [](int, int) -> prooftray::Rgb { throw std::runtime_error("Unexpected pixel read"); };
+  Reject([&] { prooftray::WriteLogTiff(-1, 1, 1, {}, no_pixel, [] { return false; }); });
+  Reject([&] { prooftray::WriteLogTiff(Descriptor(file.get()), 1, 1, {prooftray::LutEncoding::Direct}, no_pixel, [] { return false; }); });
+  Reject([&] { prooftray::WriteLogTiff(Descriptor(file.get()), 1, 1, {prooftray::LutEncoding::Linear709}, no_pixel, [] { return false; }); });
+  auto invalid = prooftray::LogExportSettings{};
   invalid.gain_ev = std::numeric_limits<float>::quiet_NaN();
-  Reject([&] { openbridge::WriteLogTiff(Descriptor(file.get()), 1, 1, invalid, no_pixel, [] { return false; }); });
+  Reject([&] { prooftray::WriteLogTiff(Descriptor(file.get()), 1, 1, invalid, no_pixel, [] { return false; }); });
 }
 
 }  // namespace
 
 int main() {
   try {
-    ReadBack(openbridge::LutEncoding::SLog3Cine, 420.);
-    ReadBack(openbridge::LutEncoding::NLog, 372.0321288231996);
+    ReadBack(prooftray::LutEncoding::SLog3Cine, 420.);
+    ReadBack(prooftray::LutEncoding::NLog, 372.0321288231996);
     CancellationAndValidation();
     std::cout << "Log TIFF tests passed\n";
     return 0;

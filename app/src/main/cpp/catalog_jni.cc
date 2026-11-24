@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "openbridge/catalog.h"
+#include "prooftray/catalog.h"
 
 namespace {
 
@@ -25,8 +25,8 @@ constexpr jsize kMaxAssets = 500000;
 constexpr jsize kMaxTags = 2000000;
 constexpr int64_t kMissingInteger = std::numeric_limits<int64_t>::min();
 
-using openbridge::jni::ThrowJava;
-using openbridge::jni::CheckJni;
+using prooftray::jni::ThrowJava;
+using prooftray::jni::CheckJni;
 
 void Require(bool condition, const char* message) {
   if (!condition) throw std::invalid_argument(message);
@@ -134,7 +134,7 @@ jintArray Query(JNIEnv* environment, jobjectArray text, jlongArray integers, jdo
   tag_values.reserve(tag_count);
   for (jsize index = 0; index < tag_count; ++index) tag_values.push_back(ReadString(environment, tags, index));
 
-  std::vector<openbridge::PhotoAsset> assets;
+  std::vector<prooftray::PhotoAsset> assets;
   assets.reserve(count);
   for (jsize index = 0; index < count; ++index) {
     const auto* number = integer_values.data() + index * kIntegerStride;
@@ -143,7 +143,7 @@ jintArray Query(JNIEnv* environment, jobjectArray text, jlongArray integers, jdo
     Require(number[7] >= 0 && number[7] <= 2 && number[8] >= 0 && number[8] <= 2, "Invalid asset state");
     Require(number[9] >= 0 && number[10] >= 0 && number[9] <= tag_count && number[10] <= tag_count - number[9], "Invalid tag range");
     Require(number[11] == 0 || number[11] == 1, "Invalid metadata completion flag");
-    openbridge::PhotoAsset asset;
+    prooftray::PhotoAsset asset;
     asset.id = ReadString(environment, text, index * kTextStride);
     asset.name = ReadString(environment, text, index * kTextStride + 1);
     asset.camera = ReadString(environment, text, index * kTextStride + 2);
@@ -151,15 +151,15 @@ jintArray Query(JNIEnv* environment, jobjectArray text, jlongArray integers, jdo
     asset.source_id = ReadString(environment, text, index * kTextStride + 4);
     asset.folder = ReadString(environment, text, index * kTextStride + 5);
     asset.stack_id = ReadString(environment, text, index * kTextStride + 6);
-    asset.format = static_cast<openbridge::MediaFormat>(number[0]);
+    asset.format = static_cast<prooftray::MediaFormat>(number[0]);
     asset.size_bytes = OptionalInteger(number[1]);
     asset.captured_at_ms = OptionalInteger(number[2]);
     asset.width = OptionalInteger(number[3]);
     asset.height = OptionalInteger(number[4]);
     asset.iso = OptionalInteger(number[5]);
     asset.rating = static_cast<int>(number[6]);
-    asset.pick_state = static_cast<openbridge::PickState>(number[7]);
-    asset.download_state = static_cast<openbridge::DownloadState>(number[8]);
+    asset.pick_state = static_cast<prooftray::PickState>(number[7]);
+    asset.download_state = static_cast<prooftray::DownloadState>(number[8]);
     asset.tags.assign(tag_values.begin() + number[9], tag_values.begin() + number[9] + number[10]);
     asset.metadata_complete = number[11] != 0;
     asset.aperture = OptionalDecimal(decimal[0]);
@@ -174,7 +174,7 @@ jintArray Query(JNIEnv* environment, jobjectArray text, jlongArray integers, jdo
   Require(fields[1] >= 0 && fields[2] <= 5, "Rating bounds must be between 0 and 5");
   Require(fields[11] >= 0 && fields[11] <= 3 && fields[14] >= 0 && fields[14] <= 4, "Invalid filter enumeration");
   Require((fields[12] == 0 || fields[12] == 1) && (fields[13] == 0 || fields[13] == 1), "Invalid filter flag");
-  openbridge::CatalogFilter filter;
+  prooftray::CatalogFilter filter;
   filter.text = ReadString(environment, filter_text, 0);
   filter.camera = ReadString(environment, filter_text, 1);
   filter.lens = ReadString(environment, filter_text, 2);
@@ -185,10 +185,10 @@ jintArray Query(JNIEnv* environment, jobjectArray text, jlongArray integers, jdo
   filter.captured_at_ms = {OptionalInteger(fields[5]), OptionalInteger(fields[6])};
   filter.size_bytes = {OptionalInteger(fields[7]), OptionalInteger(fields[8])};
   filter.iso = {OptionalInteger(fields[9]), OptionalInteger(fields[10])};
-  filter.orientation = static_cast<openbridge::Orientation>(fields[11]);
+  filter.orientation = static_cast<prooftray::Orientation>(fields[11]);
   filter.paired_raw_jpeg_only = fields[12] != 0;
   filter.include_unknown_metadata = fields[13] != 0;
-  filter.sort_order = static_cast<openbridge::SortOrder>(fields[14]);
+  filter.sort_order = static_cast<prooftray::SortOrder>(fields[14]);
   filter.aperture = {OptionalDecimal(fractions[0]), OptionalDecimal(fractions[1])};
   filter.exposure_seconds = {OptionalDecimal(fractions[2]), OptionalDecimal(fractions[3])};
   filter.focal_length_mm = {OptionalDecimal(fractions[4]), OptionalDecimal(fractions[5])};
@@ -196,7 +196,7 @@ jintArray Query(JNIEnv* environment, jobjectArray text, jlongArray integers, jdo
     filter.required_tags.push_back(ReadString(environment, filter_tags, index));
   }
 
-  const auto result = openbridge::QueryCatalog(assets, filter, collapse_stacks == JNI_TRUE);
+  const auto result = prooftray::QueryCatalog(assets, filter, collapse_stacks == JNI_TRUE);
   std::vector<jint> encoded{1, static_cast<jint>(result.matched_count), static_cast<jint>(result.pending_metadata_count),
                             static_cast<jint>(result.groups.size())};
   encoded.reserve(4 + result.groups.size() * 3 + assets.size());
@@ -214,7 +214,7 @@ jintArray Query(JNIEnv* environment, jobjectArray text, jlongArray integers, jdo
 
 }  // namespace
 
-extern "C" JNIEXPORT jintArray JNICALL Java_org_openbridge_app_domain_CatalogEngine_queryNative(
+extern "C" JNIEXPORT jintArray JNICALL Java_org_prooftray_app_domain_CatalogEngine_queryNative(
     JNIEnv* environment, jobject, jobjectArray text, jlongArray integers, jdoubleArray decimals, jobjectArray tags,
     jobjectArray filter_text, jlongArray filter_integers, jdoubleArray filter_decimals, jobjectArray filter_tags, jboolean collapse_stacks) {
   try {

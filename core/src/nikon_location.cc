@@ -1,4 +1,4 @@
-#include "openbridge/nikon_location.h"
+#include "prooftray/nikon_location.h"
 
 #include <algorithm>
 #include <chrono>
@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <string_view>
 
-namespace openbridge {
+namespace prooftray {
 
 std::vector<uint8_t> NikonCurrentTimePacket(int64_t utc_millis, int standard_offset_minutes, int daylight_minutes) {
   if (utc_millis <= 0 || utc_millis > 253402300799999LL || standard_offset_minutes < -720 || standard_offset_minutes > 840 ||
@@ -82,4 +82,4 @@ std::vector<uint8_t> NikonLocationPacket(const std::optional<LocationFix>& fix) 
   return bytes;
 }
 
-}  // namespace openbridge
+}  // namespace prooftray

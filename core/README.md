@@ -1,6 +1,6 @@
-# Catalog core
+# ProofTray core
 
-`include/openbridge/catalog.h` is the platform-independent C++20 interface. It has no Android, JNI, Kotlin or Qt dependency.
+`include/prooftray/catalog.h` is the platform-independent C++20 catalog interface.
 `QueryCatalog` performs filtering, sorting, RAW/JPEG pairing and optional burst folding. Input order is not a sorting tie-breaker: asset IDs are.
 
 Filter semantics:
@@ -34,11 +34,18 @@ Android adapter:
 - Keep the native method name if code shrinking is enabled in a future release.
 
 `tests/catalog_test.cc` contains regression cases for missing metadata, range boundaries, combined filters, conservative grouping and invalid inputs.
-They are opt-in with `OPENBRIDGE_BUILD_TESTS`. On 2026-10-28, the Windows host-debug build with GNU 13.1.0 passed CTest (1/1).
+Desktop tests are enabled by default through `OPENBRIDGE_BUILD_TESTS`. This directory can be opened independently in CLion.
+From the repository root, a standalone desktop checkout can use:
 
-Open this `core` directory in CLion as a standalone CMake project; tests are enabled by default. Its preset is `core-debug`.
-The parent project also includes this library with `add_subdirectory(core)` and has a separate `host-debug` preset.
-See [CLion and Android build instructions](../docs/building.md) for the separate core-test and APK workflows.
+```sh
+cmake -S core -B out/core
+cmake --build out/core --config Debug
+ctest --test-dir out/core -C Debug --output-on-failure
+```
+
+The optional presets are `core-debug` for this directory and `host-debug` for the parent project.
+Configure the parent with `OPENBRIDGE_BUILD_TIFF_TESTS=ON` to include Log TIFF readback tests. This requires zlib and the libtiff submodule.
+The desktop target names and CMake options retain their published names for existing toolchains and CLion run configurations.
 
 Color processing:
 
@@ -48,7 +55,8 @@ Color processing:
 - RGBA8 processing preserves alpha and row padding. Premultiplied alpha is removed before grading and restored afterwards.
 - The versioned little-endian LUT binary stores dimensions, domain and floats; titles and attribution live in Android metadata.
 - `tests/color_lut_test.cc` adds malformed input, interpolation, binary round-trip, Hald ordering and alpha/stride regressions.
-  On 2026-10-28, the Windows `core-verification` build passed all three CTest groups: catalog, PTP codec and color LUT.
+- `include/prooftray/linear_raw.h` shares the LibRaw raster adapter between Android JNI and `tools/nlog_probe.cc`.
+  Configure the parent with `OPENBRIDGE_BUILD_NLOG_PROBE=ON` to build the optional desktop probe.
 
 Location protocol:
 
@@ -57,4 +65,3 @@ Location protocol:
 - Optional altitude/satellite fields are omitted when unavailable. Invalid samples cannot produce a valid GPS record.
 - PTP command construction now supports the host-to-camera data direction used by location writes.
 - `tests/nikon_location_test.cc` covers the wire representation and boundaries.
-  On 2026-10-29, `core-verification` passed all four CTest groups, including location encoding.

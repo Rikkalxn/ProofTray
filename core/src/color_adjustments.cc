@@ -1,11 +1,11 @@
-#include "openbridge/color_lut.h"
+#include "prooftray/color_lut.h"
 
 #include <algorithm>
 #include <cmath>
 #include <mutex>
 #include <stdexcept>
 
-namespace openbridge {
+namespace prooftray {
 namespace {
 
 float Unit(float x) { return std::clamp(x, 0.f, 1.f); }
@@ -213,4 +213,4 @@ ColorLut BakeColorLook(const ColorLook& look, const ColorLut* lut) {
   return Bake([&](const Rgb& rgb) { return ApplyColorLook(rgb, look, lut); });
 }
 
-}  // namespace openbridge
+}  // namespace prooftray

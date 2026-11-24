@@ -1,10 +1,10 @@
-#include "openbridge/ptp.h"
+#include "prooftray/ptp.h"
 
 #include <array>
 #include <cstdio>
 #include <stdexcept>
 
-namespace openbridge::ptp {
+namespace prooftray::ptp {
 namespace {
 
 class Reader {
@@ -140,4 +140,4 @@ std::string ObjectInfoJson(std::span<const uint8_t> data) {
   return json + ",\"name\":" + Quote(name) + ",\"captured\":" + Quote(captured) + ",\"modified\":" + Quote(modified) + '}';
 }
 
-}  // namespace openbridge::ptp
+}  // namespace prooftray::ptp

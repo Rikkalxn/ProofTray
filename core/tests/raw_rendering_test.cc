@@ -1,5 +1,5 @@
-#include "openbridge/raw_exposure.h"
-#include "openbridge/raw_rendering.h"
+#include "prooftray/raw_exposure.h"
+#include "prooftray/raw_rendering.h"
 
 #include <cmath>
 #include <iostream>
@@ -8,7 +8,7 @@
 
 namespace {
 void Check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
-void Near(const openbridge::Rgb& a, const openbridge::Rgb& b) {
+void Near(const prooftray::Rgb& a, const prooftray::Rgb& b) {
   for (int i = 0; i < 3; ++i) Check(std::isfinite(a[i]) && std::abs(a[i] - b[i]) < 2e-5f, "RAW rendering mismatch");
 }
 template <typename F> void Reject(F function) {
@@ -17,7 +17,7 @@ template <typename F> void Reject(F function) {
 }
 
 void ReferenceVectors() {
-  using namespace openbridge;
+  using namespace prooftray;
   struct Vector { Rgb input; float baseline, exposure; Rgb expected; };
   // Independent double-precision fixtures from the pinned SDK SDR equations, including its negative-EV shoulder and D50 matrices.
   const Vector vectors[]{
@@ -54,7 +54,7 @@ void ReferenceVectors() {
 }
 
 void DisplayAndLogEndpoints() {
-  using namespace openbridge;
+  using namespace prooftray;
   const RawRenderSettings settings{.5f};
   ColorLook look;
   look.exposure_ev = 1;
@@ -87,7 +87,7 @@ void DisplayAndLogEndpoints() {
 }
 
 void OutputEncoding() {
-  using namespace openbridge;
+  using namespace prooftray;
   const auto lut = ParseCube("LUT_1D_SIZE 2\n0.1 0.4 0.5\n0.1 0.4 0.5\n");
   ColorLook look;
   look.input_encoding = LutEncoding::SLog3Cine;

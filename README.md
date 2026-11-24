@@ -1,14 +1,14 @@
-# OpenBridge
+# ProofTray
 
-面向尼康相机的 Android 选片与传图应用：**先在相机预览中挑片，再下载选中的原图，交给常用后期工具。**
+ProofTray 是面向尼康和索尼相机的 Android 选片与传图应用。可以先浏览相机预览，再下载选中的原片，进行整理、调色或导出。
 
 采用 Kotlin / Jetpack Compose 界面、C++20 核心与 JNI。支持 Android 10 及以上，当前构建包含 ARM64 和 x86_64。
-当前开发预览版本为 **0.6.10**，变更与验证范围见 [发布说明](docs/releases/0.6.10.md)。
+当前版本号和支持的 ABI 见 [Android 模块配置](app/build.gradle.kts)。
 
 ## 功能
 
-- **相机传图**：BLE 配对引导、Wi-Fi AP / STA 连接、相机目录分页、预览及所选原片下载。
-- **便携 JPEG 自动下载**：BLE 通知触发经典蓝牙 RFCOMM 传图，完成后恢复 BLE 待机；原图通过 Wi-Fi 传输。
+- **相机传图**支持尼康与索尼各自的连接流程、相机目录分页、预览及所选原片下载。
+- **尼康便携 JPEG 自动下载**由 BLE 通知触发，经经典蓝牙 RFCOMM 传图，完成后恢复 BLE 待机。原图通过 Wi-Fi 传输。
 - **选片与管理**：图库 / 相机导入分开，组合筛选、评分、标签、RAW/JPEG 配对、连拍分组和多图同步比较。
 - **传输队列**：记录导入历史，支持取消、重试，以及机型支持时的原图分段续传。
 - **调色与导出**：CUBE / HaldCLUT、`.oblook` 风格模板、批量原格式导出及 JPEG / PNG 转换。
@@ -28,12 +28,10 @@
 已知边界：
 
 - 更多机型、GPS、长时间后台运行及实际功耗仍需实测。
-- RAW 完整解码渲染、NEF 转 DNG、Lightroom 编辑预设复现和原图瓦片式 100% 检查尚未实现。
-- JPEG / PNG / HEIF 转换依赖系统解码；RAW / TIFF 可按原格式导出，RAW 预览依赖相机缓存或内嵌 JPEG。
+- JPEG、PNG 和 HEIF 转换使用系统解码。RAW 显影使用 LibRaw，支持的机型和压缩格式取决于仓库固定的版本。
+- RAW 支持调色和 16 位 Log TIFF 导出。NEF 转 DNG、Lightroom 编辑预设复现和原图瓦片式 100% 检查仍待实现。
 - 自动原图下载需要已有 Wi-Fi 连接，按本次会话基线识别新照片；跨重连期间的原片需要手动补导。
 - 中断后的部分任务需要重连并显式重试，不承诺后台持续连接。
-
-首次连接与验收步骤见 [相机测试说明](docs/camera-testing.md)，传输行为依据见 [协议参考](docs/protocol-references.md)。
 
 ## 构建
 
@@ -56,10 +54,10 @@ LibRaw 由 submodule 固定到经审查的上游提交，包含 ILCE-7M5 支持�
 ```
 
 Linux / macOS 使用 `./gradlew :app:assembleDebug`。Debug APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
-环境配置、C++ 核心测试及 Release 签名打包见 [构建说明](docs/building.md)。
+桌面端可用自己的 CLion 工具链打开 `core/`。也可用 CMake 构建和运行独立核心测试，见 [核心说明](core/README.md)。
 
-仓库包含 [GitHub Actions](.github/workflows/build.yml)：推送、PR 或手动触发时构建 Debug APK，并运行 JVM 与 C++ 核心测试。
-在 GitHub 的 **Actions → Build → 对应运行 → Artifacts** 下载 APK 和测试报告；产物保留 14 天。
+推送、PR 或手动触发构建 Debug APK，同时运行 JVM、C++ 核心和 Log TIFF 测试。见 [GitHub Actions 工作流](.github/workflows/build.yml)。
+在 GitHub 的 **Actions → Build → 对应运行 → Artifacts** 下载 APK、随包许可、含子模块的对应源码和测试报告。产物保留 14 天。
 CI 递归检出固定版本的 submodule。GitHub 自动生成的源码 ZIP/TAR 不包含子模块，获取完整源码请使用递归克隆。
 CI 使用临时调试签名，不适合作为稳定更新渠道，也不能保证覆盖已有安装；正式发布使用单独备份的 Release 密钥。
 
@@ -67,22 +65,21 @@ CI 使用临时调试签名，不适合作为稳定更新渠道，也不能保�
 
 | 路径 | 内容 |
 | --- | --- |
-| `app/` | Android 界面、平台适配、JNI 和 JVM 测试 |
-| `core/` | C++20 目录查询、协议编解码、LUT 与核心测试 |
-| `third_party/` | LibRaw submodule、摘取适配的第三方组件及原许可证 |
-| `design/brand/` | 项目图标源文件 |
-| `tools/` | 可选的 Windows 环境、构建和发布脚本 |
-| `docs/` | 构建、协议、产品设计与发布说明 |
+| `app/src/main/java/org/prooftray/app/` | Kotlin 应用入口，按 camera、data、domain、color、frame 和 ui 分包 |
+| `app/src/main/cpp/` | Kotlin 与原生核心之间的 JNI 适配 |
+| `app/src/test/`、`app/src/debug/` | JVM 测试和调试构建专用入口 |
+| `core/include/prooftray/`、`core/src/` | C++20 目录查询、协议编解码、RAW 和调色接口及实现 |
+| `core/tests/`、`core/tools/` | 原生测试和可选的桌面 RAW 校准工具 |
+| `third_party/` | 固定版本的 LibRaw、libtiff 子模块及 furble 源码和许可 |
+| `licenses/` | 上游未单独提供或通过 Maven 获取的组件声明，以及 Adobe DNG SDK 许可 |
 
-- [C++ 核心接口](core/README.md)
-- [产品范围与后续方向](docs/product-scope.md)
-- [界面规范](docs/ui-design.md)
-- [预览质量与回退策略](docs/preview-quality.md)
-- [风格模板示例](docs/examples/soft.oblook)
+源码包名为 `org.prooftray.app`。已发布应用继续使用安装 ID `org.openbridge.app` 和原启动组件，以支持覆盖更新及现有桌面快捷方式。
+数据库名、相机预览 URI、风格与边框模板格式标识也沿用已发布值。桌面 CMake 目标名和选项兼容已有 CLion 配置。
+Debug 构建的相机诊断广播组件为 `org.openbridge.app/org.prooftray.app.debug.CameraDebugReceiver`。
 
 ## 许可证
 
-项目自有代码与文档采用 [Apache License 2.0](LICENSE)，允许修改、商用及闭源分发，须遵守许可证中的声明保留等要求。
-第三方组件保留原许可证；furble 的 Blowfish 实现及配对哈希适配涉及 MIT 授权，详见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+项目自有代码与文档采用 [Apache License 2.0](LICENSE)。
+第三方组件各自的授权、来源和版权信息见 [第三方声明](THIRD_PARTY_NOTICES.md)。应用内可在「设置 → 关于 → 开源与许可」离线查看随包文本。
 
-OpenBridge 是独立项目，与 Nikon 无隶属关系。官方应用代码、库和素材不随本项目分发。
+ProofTray 由独立开发者维护。尼康和索尼官方应用仅用于本地协议核对。

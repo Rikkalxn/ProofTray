@@ -1,10 +1,10 @@
-#ifndef OPENBRIDGE_COLOR_LOOK_JNI_H_
-#define OPENBRIDGE_COLOR_LOOK_JNI_H_
+#ifndef PROOFTRAY_COLOR_LOOK_JNI_H_
+#define PROOFTRAY_COLOR_LOOK_JNI_H_
 
 #include "jni_support.h"
-#include "openbridge/color_lut.h"
+#include "prooftray/color_lut.h"
 
-namespace openbridge::jni {
+namespace prooftray::jni {
 
 inline ColorLook ReadColorLook(JNIEnv* env, jfloatArray settings, jfloatArray edits, jint input, jint output) {
   if (!settings || env->GetArrayLength(settings) != 7 || !edits) throw std::invalid_argument("Invalid color recipe");
@@ -25,5 +25,5 @@ inline ColorLook ReadColorLook(JNIEnv* env, jfloatArray settings, jfloatArray ed
   return look;
 }
 
-}  // namespace openbridge::jni
-#endif  // OPENBRIDGE_COLOR_LOOK_JNI_H_
+}  // namespace prooftray::jni
+#endif  // PROOFTRAY_COLOR_LOOK_JNI_H_

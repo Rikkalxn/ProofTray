@@ -2,14 +2,14 @@
 // Adobe permits use, modification and distribution under the DNG SDK License Agreement.
 // See licenses/Adobe-DNG-SDK.txt and THIRD_PARTY_NOTICES.md for the license, source revision and adaptation scope.
 
-#include "openbridge/raw_rendering.h"
+#include "prooftray/raw_rendering.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <stdexcept>
 
-namespace openbridge {
+namespace prooftray {
 namespace {
 using Vector = std::array<double, 3>;
 using Matrix = std::array<Vector, 3>;
@@ -146,4 +146,4 @@ Rgb RenderRawDisplayPixel(const Rgb& linear, const ColorLut* lut, const RawDispl
   return base;
 }
 
-}  // namespace openbridge
+}  // namespace prooftray

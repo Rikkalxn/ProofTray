@@ -1,4 +1,4 @@
-#include "openbridge/log_tiff.h"
+#include "prooftray/log_tiff.h"
 
 #include <tiffio.h>
 
@@ -15,9 +15,9 @@
 #include <string>
 #include <vector>
 
-#include "openbridge/raw_exposure.h"
+#include "prooftray/raw_exposure.h"
 
-namespace openbridge {
+namespace prooftray {
 namespace {
 
 struct TiffError {
@@ -75,7 +75,7 @@ void WriteLogTiff(int fd, int width, int height, const LogExportSettings& settin
   TIFFOpenOptionsSetMaxSingleMemAlloc(options.get(), 8 * 1024 * 1024);
   TIFFOpenOptionsSetErrorHandlerExtR(options.get(), TiffError::Handle, &error);
   TIFFOpenOptionsSetWarningHandlerExtR(options.get(), TiffError::Ignore, nullptr);
-  std::unique_ptr<TIFF, decltype(&ReleaseTiff)> tiff(TIFFFdOpenExt(fd, "OpenBridge Log", "wl", options.get()), ReleaseTiff);
+  std::unique_ptr<TIFF, decltype(&ReleaseTiff)> tiff(TIFFFdOpenExt(fd, "ProofTray Log", "wl", options.get()), ReleaseTiff);
   error.Check(tiff != nullptr);
   const auto set = [&](uint32_t tag, auto... values) { error.Check(TIFFSetField(tiff.get(), tag, values...) == 1); };
   set(TIFFTAG_IMAGEWIDTH, static_cast<uint32_t>(width));
@@ -90,7 +90,7 @@ void WriteLogTiff(int fd, int width, int height, const LogExportSettings& settin
   set(TIFFTAG_PREDICTOR, PREDICTOR_HORIZONTAL);
   set(TIFFTAG_ZIPQUALITY, 6);
   set(TIFFTAG_ROWSPERSTRIP, TIFFDefaultStripSize(tiff.get(), 0));
-  set(TIFFTAG_SOFTWARE, "OpenBridge Log exporter");
+  set(TIFFTAG_SOFTWARE, "ProofTray Log exporter");
   set(TIFFTAG_IMAGEDESCRIPTION, description.c_str());
   // Log code values are deliberately not labeled with an sRGB ICC profile, transfer function or EXIF ColorSpace=1.
   std::vector<uint16_t> row(static_cast<size_t>(width) * 3);
@@ -110,4 +110,4 @@ void WriteLogTiff(int fd, int width, int height, const LogExportSettings& settin
   error.Check(TIFFFlush(tiff.get()) == 1);
 }
 
-}  // namespace openbridge
+}  // namespace prooftray

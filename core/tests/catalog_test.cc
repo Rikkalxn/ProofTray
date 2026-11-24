@@ -1,4 +1,4 @@
-#include "openbridge/catalog.h"
+#include "prooftray/catalog.h"
 
 #include <iostream>
 #include <stdexcept>
@@ -8,10 +8,10 @@
 
 namespace {
 
-using openbridge::CatalogFilter;
-using openbridge::MediaFormat;
-using openbridge::PhotoAsset;
-using openbridge::QueryCatalog;
+using prooftray::CatalogFilter;
+using prooftray::MediaFormat;
+using prooftray::PhotoAsset;
+using prooftray::QueryCatalog;
 
 void Expect(bool condition, const char* message) {
   if (!condition) throw std::runtime_error(message);
@@ -59,18 +59,18 @@ void CombinedRangesAndTags() {
   auto photo = Photo("photo", "Portrait.JPG", 1700000000000);
   photo.rating = 4;
   photo.tags = {"Travel", "Selected"};
-  photo.pick_state = openbridge::PickState::kPicked;
+  photo.pick_state = prooftray::PickState::kPicked;
   CatalogFilter filter;
   filter.format_mask = (1u << static_cast<unsigned>(MediaFormat::kJpeg)) | (1u << static_cast<unsigned>(MediaFormat::kRaw));
   filter.rating = {4, 5};
-  filter.pick_mask = 1u << static_cast<unsigned>(openbridge::PickState::kPicked);
-  filter.download_mask = 1u << static_cast<unsigned>(openbridge::DownloadState::kDownloaded);
+  filter.pick_mask = 1u << static_cast<unsigned>(prooftray::PickState::kPicked);
+  filter.download_mask = 1u << static_cast<unsigned>(prooftray::DownloadState::kDownloaded);
   filter.captured_at_ms = {1700000000000, 1700000000000};
   filter.size_bytes = {25000000, 25000000};
   filter.aperture = {2.8, 2.8};
   filter.exposure_seconds = {0.004, 0.004};
   filter.focal_length_mm = {50.0, 50.0};
-  filter.orientation = openbridge::Orientation::kLandscape;
+  filter.orientation = prooftray::Orientation::kLandscape;
   filter.camera = "nikon";
   filter.lens = "24-70";
   filter.required_tags = {"travel", "selected"};
