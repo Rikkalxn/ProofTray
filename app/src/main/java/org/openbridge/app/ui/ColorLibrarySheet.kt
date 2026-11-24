@@ -3,17 +3,13 @@ package org.openbridge.app.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
@@ -36,54 +32,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import org.openbridge.app.domain.ColorLookSettings
 import org.openbridge.app.domain.LutAsset
-import org.openbridge.app.domain.LutEncoding
-import org.openbridge.app.domain.LutUsage
 import org.openbridge.app.domain.validateLutName
 
 internal sealed interface ColorLibraryEntry {
     data class Lut(val id: String) : ColorLibraryEntry
     data class Preset(val id: String) : ColorLibraryEntry
-}
-
-@Composable
-internal fun LutKindMenu(usage: LutUsage, allowLog: Boolean, onChange: (LutUsage) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        TextButton(onClick = { expanded = true }, modifier = Modifier.widthIn(max = 160.dp)) {
-            Text(if (usage.unavailableReason != null) "不可用" else usage.input?.label.orEmpty(), maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        DropdownMenu(expanded, onDismissRequest = { expanded = false }) {
-            LutEncoding.entries.forEach { encoding ->
-                DropdownMenuItem(text = { Text(encoding.label) }, enabled = allowLog || !encoding.isLog, onClick = {
-                    expanded = false
-                    if (encoding != usage.input || usage.unavailableReason != null) {
-                        onChange(usage.withInput(encoding))
-                    }
-                })
-            }
-        }
-    }
-}
-
-@Composable
-internal fun LutOutputMenu(usage: LutUsage, onChange: (LutUsage) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    fun label(encoding: LutEncoding?) = when (encoding) {
-        LutEncoding.DIRECT -> "sRGB · 直接显示"
-        LutEncoding.REC709_G24 -> "Rec.709 γ2.4"
-        else -> "不可用"
-    }
-    Box {
-        TextButton(onClick = { expanded = true }) { Text(label(usage.output)) }
-        DropdownMenu(expanded, onDismissRequest = { expanded = false }) {
-            LutUsage.logOutputs.forEach { encoding ->
-                DropdownMenuItem(text = { Text(label(encoding)) }, onClick = {
-                    expanded = false
-                    onChange(usage.copy(outputName = encoding.name, outputRange = org.openbridge.app.domain.LutRange.FULL))
-                })
-            }
-        }
-    }
 }
 
 @Composable

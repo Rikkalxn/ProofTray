@@ -48,6 +48,7 @@ data class CameraDownload(
     val channel: DownloadChannel = DownloadChannel.WIFI
 ) {
     val expectedBytes: Long get() = if (variant == DownloadVariant.ORIGINAL) photo.asset.sizeBytes else payloadBytes
+    val pending: Boolean get() = status == DownloadStatus.QUEUED || status == DownloadStatus.RUNNING || status == DownloadStatus.WAITING
     val canClearHistory: Boolean get() = status == DownloadStatus.COMPLETED ||
         (status in setOf(DownloadStatus.WAITING, DownloadStatus.CANCELLED) && outputUri == null)
 }

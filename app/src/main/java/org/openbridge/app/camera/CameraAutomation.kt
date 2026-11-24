@@ -92,9 +92,8 @@ internal class CameraAutomation(
                 WifiStatus(it.connected, it.connecting, it.generation, it.manuallyDisconnected)
             }.distinctUntilChanged()
             val control = combine(host.ble.state, bluetoothHandoff, standbyAllowed) { current, handoff, allowed ->
-                handoff?.copy(wifiRequested = current.wifiRequested, allowReconnect = allowed, adapterEnabled = current.adapterEnabled) ?: BleControl(
-                    bluetoothDataReady(current.authenticated, current.systemPaired, current.pairingInProgress),
-                    current.connectedAddress, current.wifiRequested, allowed, current.adapterEnabled, current.scanning)
+                handoff?.copy(wifiRequested = current.wifiRequested, allowReconnect = allowed, adapterEnabled = current.adapterEnabled)
+                    ?: BleControl(current.dataReady, current.connectedAddress, current.wifiRequested, allowed, current.adapterEnabled, current.scanning)
             }
                 .distinctUntilChanged()
             combine(policy, connection, control) { value, wifi, ble ->
@@ -228,9 +227,7 @@ internal class CameraAutomation(
             delay(600) // Merge bursts and allow RAW/JPEG pairs to finish writing.
             currentCoroutineContext().ensureActive()
             if (host.camera.value.paused) { report(true, "自动导入已暂停"); continue }
-            val pendingTasks = host.camera.value.tasks.count {
-                it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
-            }
+            val pendingTasks = host.camera.value.tasks.count { it.pending }
             if (pendingTasks >= 100) { report(true, "已有 100 项待处理，等待队列腾出空间"); continue }
             val snapshot = host.handles(session)
             val candidates = tracker.observe(snapshot.handles, snapshot.revision)
@@ -320,8 +317,7 @@ internal class CameraAutomation(
             "Wi-Fi 正在连接或传输，请断开 Wi-Fi 会话后重试蓝牙"
         }
         val control = host.ble.state.value
-        check(bluetoothDataReady(control.authenticated, control.systemPaired, control.pairingInProgress) &&
-            control.connectedAddress == policy.control) { "所选相机的蓝牙控制连接尚未就绪" }
+        check(control.dataReady && control.connectedAddress == policy.control) { "所选相机的蓝牙控制连接尚未就绪" }
         check(policy.transfer.isNotBlank()) { "请先关联已配对的蓝牙传图设备" }
         if (host.camera.value.paused) throw TransferPaused()
         val power = context.getSystemService(PowerManager::class.java)

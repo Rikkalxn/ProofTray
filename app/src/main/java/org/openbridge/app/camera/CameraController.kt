@@ -1,24 +1,14 @@
 package org.openbridge.app.camera
 
-import android.content.ContentValues
 import android.content.Context
-import android.net.Uri
 import android.net.Network
-import android.os.SystemClock
-import android.provider.MediaStore
-import android.provider.OpenableColumns
 import android.util.Log
-import android.util.Base64
 import java.util.UUID
-import java.io.FileNotFoundException
-import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -28,22 +18,19 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import org.openbridge.app.data.PhotoRepository
-import org.openbridge.app.data.GalleryPublisher
-import org.openbridge.app.data.sourceGeometry
 import org.openbridge.app.data.AppSettingsRepository
 import org.openbridge.app.domain.DownloadVariant
 import org.openbridge.app.domain.AutoDownloadKind
-import org.openbridge.app.domain.DownloadState
-import org.openbridge.app.domain.photoMimeType
-import org.openbridge.app.domain.PhotoAsset
 import org.openbridge.app.domain.SortOrder
 
+/**
+ * Facade over the camera stack. It owns the connection lifecycle (BLE control, camera Wi-Fi, PTP session) and hands
+ * catalog reading, the import queue and location routing to [CameraCatalogBrowser], [CameraDownloadQueue] and [CameraLocationRouter].
+ */
 class CameraController private constructor(private val context: Context) {
     private val browsingPreferences = context.getSharedPreferences("camera-browser", Context.MODE_PRIVATE)
     private val mutableState = MutableStateFlow(CameraState(
@@ -57,15 +44,14 @@ class CameraController private constructor(private val context: Context) {
     }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + errors)
     private val network = CameraNetwork(context, scope)
-    internal val ble = NikonBle(context, scope)
+    private val identities = CameraIdentityStore(context)
+    internal val ble = NikonBle(context, scope, identities)
     private val sony = SonyControl(context) { ready -> mutableState.update { it.copy(sonyControlConnected = ready) } }
     internal val sonyLocationChanges = sony.locationChanges
     val bleState = ble.state
     val endpoints = network.endpoints
     private val changed = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val catalogChanged = changed.asSharedFlow()
-    private val repository = PhotoRepository.get(context)
-    private val gallery = GalleryPublisher(context)
     private val settings = AppSettingsRepository.get(context)
     private val bluetoothPairing: BluetoothPairingCoordinator by lazy {
         BluetoothPairingCoordinator(context, scope, ble, settings) {
@@ -73,14 +59,7 @@ class CameraController private constructor(private val context: Context) {
             automatic.awaitBluetoothIdle()
         }
     }
-    private val jpegSaver = CameraJpegSaver(context)
-    private val journal = CameraJournal(context)
     private val requests = Mutex()
-    private val fileReceiver = CameraFileReceiver(context, requests, ::active)
-    private val taskLock = Mutex()
-    private val remote get() = browser.photos
-    private val cancelled = ConcurrentHashMap.newKeySet<String>()
-    private val wake = Channel<Unit>(Channel.CONFLATED)
     @Volatile private var link: PtpLink? = null
     @Volatile private var connectionGeneration = 0
     private var connectionJob: Job? = null
@@ -91,18 +70,19 @@ class CameraController private constructor(private val context: Context) {
     private var manualBluetoothJob: Job? = null
     private var identity = ""
     private val browser = CameraCatalogBrowser(context, scope, requests, ::browseSession, ::catalogProgress) { changed.emit(Unit) }
-    private val locationWrites = Mutex()
-    private var locationTarget: CameraLocationChannel? = null
-    @Volatile private var sonyLocationStopped = false
+    private val remote get() = browser.photos
+    internal val location = CameraLocationRouter(settings, state, sony, ble, requests, ::browseSession)
+    private val downloads = CameraDownloadQueue(context, scope, mutableState, requests, object : DownloadSource {
+        override val identity: String get() = this@CameraController.identity
+        override fun photo(id: String) = remote[id]
+        override fun active() = this@CameraController.active()
+        override fun isLive(link: PtpLink) = this@CameraController.link === link && link.connected
+    }) { changed.emit(Unit) }
     private val automatic: CameraAutomation = CameraAutomation(context, scope, settings, object : AutomaticTransferHost {
         override val camera = state
         override val ble = this@CameraController.ble
         override fun wifiSession() = browseSession()
-        override fun clientIdentity(): ByteArray {
-            val encoded = context.getSharedPreferences("camera-identity", Context.MODE_PRIVATE).getString("bleIdentity", null)
-                ?: error("请先完成本应用的 BLE 配对")
-            return Base64.decode(encoded, Base64.DEFAULT)
-        }
+        override fun clientIdentity(): ByteArray = identities.bleIdentity() ?: error("请先完成本应用的 BLE 配对")
         override suspend fun handles(session: CameraBrowseSession): CameraObjectSnapshot {
             suspend fun <T> request(read: (PtpLink) -> T): T = requests.withLock {
                 check(browseSession()?.generation == session.generation) { "相机会话已变化" }
@@ -123,9 +103,9 @@ class CameraController private constructor(private val context: Context) {
         }
         override suspend fun enqueueOriginals(photos: List<RemotePhoto>) {
             photos.forEach { remote[it.asset.id] = it }
-            enqueuePhotos(photos, DownloadVariant.ORIGINAL, true)
+            downloads.enqueue(photos, DownloadVariant.ORIGINAL, automatic = true)
         }
-        override suspend fun receiveBluetooth(photo: RemotePhoto, bytes: () -> ByteArray) = receiveBluetoothCopy(photo, bytes)
+        override suspend fun receiveBluetooth(photo: RemotePhoto, bytes: () -> ByteArray) = downloads.receiveBluetooth(photo, bytes)
         override suspend fun reconnectBluetooth(camera: BleCamera) {
             currentCoroutineContext().ensureActive()
             val job = synchronized(this@CameraController) {
@@ -145,41 +125,17 @@ class CameraController private constructor(private val context: Context) {
 
     init {
         scope.launch {
-            taskLock.withLock {
-                val recovered = journal.load().map { task ->
-                    if (task.status == DownloadStatus.RUNNING || task.status == DownloadStatus.QUEUED) {
-                        task.copy(status = DownloadStatus.WAITING, message = "上次任务中断，连接同一相机并刷新目录后重试")
-                    } else task
-                }
-                mutableState.update { it.copy(tasks = recovered) }
-                journal.save(recovered)
-            }
-            val originals = state.value.tasks.filter { it.status == DownloadStatus.COMPLETED && it.variant == DownloadVariant.ORIGINAL }
-                .mapNotNull { it.outputUri?.let(Uri::parse) }
-            scope.launch { gallery.restoreIndexOnce("camera-originals-v1", originals) }
-            for (signal in wake) {
-                while (state.value.connected && !state.value.paused) {
-                    val task = state.value.tasks.firstOrNull { it.status == DownloadStatus.QUEUED && it.channel == DownloadChannel.WIFI } ?: break
-                    try { download(task) } catch (error: Exception) {
-                        if (error is CancellationException) throw error
-                        mutableState.update { it.copy(paused = true, message = "任务记录保存失败，队列已暂停：${error.message}") }
-                    }
-                }
-            }
-        }
-        scope.launch {
             while (true) {
                 delay(settings.state.value.powerProfile.pollSeconds.coerceAtLeast(15) * 1000L)
-                if (state.value.connected) {
-                    val generation = connectionGeneration
-                    runCatching { requests.withLock {
+                if (!state.value.connected) continue
+                val generation = connectionGeneration
+                try {
+                    requests.withLock {
                         check(generation == connectionGeneration) { "相机会话已更换" }
                         if (state.value.tasks.none { it.status == DownloadStatus.RUNNING && it.channel == DownloadChannel.WIFI }) active().ping()
-                    } }.onFailure { error ->
-                        if (error is CancellationException) throw error
-                        connectionLost(generation, error)
                     }
-                }
+                } catch (stop: CancellationException) { throw stop }
+                catch (error: Exception) { connectionLost(generation, error) }
             }
         }
     }
@@ -195,9 +151,13 @@ class CameraController private constructor(private val context: Context) {
 
     fun retryConnection() { retryWifi?.invoke() }
 
+    private fun ensureGeneration(generation: Int) {
+        if (generation != connectionGeneration) throw CancellationException("连接操作已取消")
+    }
+
     @Synchronized
     private fun startWifiConnection(initialPhase: ConnectionPhase, prepare: suspend ((ConnectionPhase, String) -> Unit) -> WifiPlan) {
-        sonyLocationStopped = false
+        location.sonyStopped = false
         CameraService.start(context)
         preferWifi()
         disconnectWifi()
@@ -208,7 +168,7 @@ class CameraController private constructor(private val context: Context) {
             var attempt: PtpLink? = null
             fun progress(phase: ConnectionPhase, message: String) {
                 synchronized(this@CameraController) {
-                    if (generation != connectionGeneration) throw CancellationException("连接操作已取消")
+                    ensureGeneration(generation)
                     mutableState.update { it.copy(connectionPhase = phase, stage = message) }
                 }
             }
@@ -224,7 +184,7 @@ class CameraController private constructor(private val context: Context) {
                     else network.wifi()
                 currentCoroutineContext().ensureActive()
                 synchronized(this@CameraController) {
-                    if (generation != connectionGeneration) throw CancellationException("连接操作已取消")
+                    ensureGeneration(generation)
                     if (!managedHotspot) network.watch(route, lost)
                 }
                 network.awaitAddress(route)
@@ -233,10 +193,6 @@ class CameraController private constructor(private val context: Context) {
                     network.hotspotAddress(route, preferDhcp = !config.sonyCamera)
                 }
                 progress(ConnectionPhase.PTP, "Wi-Fi 已就绪，正在建立相机传图会话")
-                val preferences = context.getSharedPreferences("camera-identity", Context.MODE_PRIVATE)
-                val guid = preferences.getString("ptpGuid", null)?.let(UUID::fromString) ?: UUID.randomUUID().also {
-                    preferences.edit().putString("ptpGuid", it.toString()).apply()
-                }
                 val expectedMake = when {
                     config.sonyCamera -> CameraMake.SONY
                     initialPhase == ConnectionPhase.BLUETOOTH -> CameraMake.NIKON
@@ -247,10 +203,10 @@ class CameraController private constructor(private val context: Context) {
                 }
                 attempt = session
                 synchronized(this@CameraController) {
-                    if (generation != connectionGeneration) throw CancellationException("连接操作已取消")
+                    ensureGeneration(generation)
                     link = session
                 }
-                requests.withLock { session.connect(guid) }
+                requests.withLock { session.connect(identities.ptpGuid()) }
                 currentCoroutineContext().ensureActive()
                 val device = session.device
                 val serial = cameraSerial(device.optString("serial"))
@@ -315,19 +271,25 @@ class CameraController private constructor(private val context: Context) {
         mutableState.update { it.disconnected(connectionGeneration, reason) }
     }
 
+    private fun clearManualDisconnect() = mutableState.update { it.copy(manuallyDisconnected = false) }
+
     @Synchronized
     fun scanBle() {
-        mutableState.update { it.copy(manuallyDisconnected = false) }
-        CameraService.start(context); automatic.cancelActiveBluetooth(); ble.scan(includeSony = true)
+        clearManualDisconnect()
+        CameraService.start(context)
+        automatic.cancelActiveBluetooth()
+        ble.scan(includeSony = true)
     }
+
     @Synchronized
     fun stopBleScan() {
         ble.stopScan()
         ble.connectionMessage(if (ble.state.value.authenticated) "已停止搜索，蓝牙控制仍连接" else "已停止搜索")
     }
+
     @Synchronized
     fun connectBle(camera: BleCamera) {
-        mutableState.update { it.copy(manuallyDisconnected = false) }
+        clearManualDisconnect()
         CameraService.start(context)
         if (camera.make == CameraMake.SONY) { pairSony(camera); return }
         sony.close()
@@ -346,6 +308,7 @@ class CameraController private constructor(private val context: Context) {
         if (!camera.classic) settings.update { it.copy(controlAddress = camera.address, controlName = camera.name) }
         bluetoothPairing.connect(camera, initializePairing = !known || camera.classic)
     }
+
     private fun pairSony(camera: BleCamera) {
         disconnect()
         ble.stopScan()
@@ -361,11 +324,11 @@ class CameraController private constructor(private val context: Context) {
                 synchronized(this@CameraController) {
                     if (generation != connectionGeneration) return@launch
                     settings.update { it.copy(sonySelected = true, sonyAddress = camera.address, sonyName = camera.name) }
-                    sonyLocationStopped = false
+                    location.sonyStopped = false
                     mutableState.update { it.copy(connecting = false, busy = false, connectionPhase = ConnectionPhase.IDLE,
                         stage = "索尼相机已配对，可以导入照片", message = null) }
                 }
-            } catch (error: CancellationException) { throw error }
+            } catch (stop: CancellationException) { throw stop }
             catch (error: Exception) {
                 synchronized(this@CameraController) {
                     if (generation != connectionGeneration) return@launch
@@ -379,16 +342,18 @@ class CameraController private constructor(private val context: Context) {
     @Synchronized
     fun discoverClassic() {
         if (settings.state.value.sonySelected) return
-        mutableState.update { it.copy(manuallyDisconnected = false) }
+        clearManualDisconnect()
         automatic.allowStandbyReconnect(true)
-        if (settings.state.value.controlAddress.isBlank()) ble.pairingStatus("请先搜索并选择相机的 BLE 控制设备", false, false)
-        else {
-            CameraService.start(context)
-            releaseStaleWifiPreference()
-            val saved = settings.state.value
-            bluetoothPairing.connect(BleCamera(saved.controlAddress, saved.controlName), rediscover = true, initializePairing = true)
+        val saved = settings.state.value
+        if (saved.controlAddress.isBlank()) {
+            ble.pairingStatus("请先搜索并选择相机的 BLE 控制设备", false, false)
+            return
         }
+        CameraService.start(context)
+        releaseStaleWifiPreference()
+        bluetoothPairing.connect(BleCamera(saved.controlAddress, saved.controlName), rediscover = true, initializePairing = true)
     }
+
     @Synchronized
     fun wakeWifi() {
         retryWifi = { wakeWifi() }
@@ -411,17 +376,7 @@ class CameraController private constructor(private val context: Context) {
         automatic.allowStandbyReconnect(true)
         startWifiConnection(ConnectionPhase.BLUETOOTH) { progress ->
             progress(ConnectionPhase.BLUETOOTH, "正在连接已保存的相机")
-            bluetoothPairing.awaitCurrent()
-            val saved = settings.state.value
-            check(saved.controlAddress.isNotBlank()) { "请先搜索并配对相机，再连接相机 Wi-Fi" }
-            val current = ble.state.value
-            if (!bluetoothDataReady(current.authenticated, current.systemPaired, current.pairingInProgress) ||
-                current.connectedAddress != saved.controlAddress) {
-                bluetoothPairing.connect(BleCamera(saved.controlAddress, saved.controlName), rediscover = true, initializePairing = false).join()
-            }
-            currentCoroutineContext().ensureActive()
-            val control = ble.state.value
-            check(bluetoothDataReady(control.authenticated, control.systemPaired, control.pairingInProgress)) { control.message }
+            val control = awaitSavedControl("请先搜索并配对相机，再连接相机 Wi-Fi")
             progress(ConnectionPhase.CAMERA_WIFI, "蓝牙已就绪，正在读取相机热点配置")
             val serial = cameraSerial(control.serialNumber)
             val wifi = ble.startCameraHotspot { settings ->
@@ -434,6 +389,22 @@ class CameraController private constructor(private val context: Context) {
             }
             WifiPlan(CameraConnection(ssid = wifi.ssid, password = wifi.password, security = wifi.security), serial)
         }
+    }
+
+    /** Reconnects the saved Nikon BLE control link when it is not the live one, then returns its ready state. */
+    private suspend fun awaitSavedControl(missingMessage: String, reconnecting: () -> Unit = {}): BleState {
+        bluetoothPairing.awaitCurrent()
+        val saved = settings.state.value
+        check(saved.controlAddress.isNotBlank()) { missingMessage }
+        val current = ble.state.value
+        if (!current.dataReady || current.connectedAddress != saved.controlAddress) {
+            reconnecting()
+            bluetoothPairing.connect(BleCamera(saved.controlAddress, saved.controlName), rediscover = true, initializePairing = false).join()
+        }
+        currentCoroutineContext().ensureActive()
+        val control = ble.state.value
+        check(control.dataReady) { control.message }
+        return control
     }
 
     fun disconnectWifiSession() = endConnection(all = false)
@@ -463,7 +434,7 @@ class CameraController private constructor(private val context: Context) {
             val deadline = scope.launch { delay(1800); session.close() }
             connectionJob = scope.launch {
                 try { requests.withLock { session.finishSonyImport() } }
-                catch (cancelled: CancellationException) { throw cancelled }
+                catch (stop: CancellationException) { throw stop }
                 catch (_: Exception) { /* Closing the transport also terminates the session if the camera has already left Wi-Fi. */ }
                 finally {
                     deadline.cancel()
@@ -478,10 +449,8 @@ class CameraController private constructor(private val context: Context) {
         if (all) return
         val options = settings.state.value
         if (options.sonySelected) return
-        val control = ble.state.value
-        if (options.controlAddress.isNotBlank() &&
-            ((options.autoDownload && options.autoKind == AutoDownloadKind.CAMERA_JPEG) || options.locationSync) &&
-            !bluetoothDataReady(control.authenticated, control.systemPaired, control.pairingInProgress)) connectSavedControl()
+        val keepControl = (options.autoDownload && options.autoKind == AutoDownloadKind.CAMERA_JPEG) || options.locationSync
+        if (options.controlAddress.isNotBlank() && keepControl && !ble.state.value.dataReady) connectSavedControl()
     }
 
     @Synchronized
@@ -516,9 +485,10 @@ class CameraController private constructor(private val context: Context) {
 
     fun discoverSta() { network.discover() }
     fun pairedDevices(): List<BleCamera> = ble.pairedDevices()
+
     @Synchronized
     fun disconnectControl() {
-        sonyLocationStopped = true
+        location.sonyStopped = true
         sony.close()
         automatic.allowStandbyReconnect(false)
         manualBluetoothJob?.cancel()
@@ -531,7 +501,7 @@ class CameraController private constructor(private val context: Context) {
     fun checkBluetoothTransfers() {
         if (settings.state.value.sonySelected) return
         if (!automatic.beginManualCheck()) return
-        mutableState.update { it.copy(manuallyDisconnected = false) }
+        clearManualDisconnect()
         manualBluetoothJob = scope.launch {
             var result = "蓝牙检查已取消"
             try {
@@ -541,24 +511,10 @@ class CameraController private constructor(private val context: Context) {
                     releaseWifiPreference()
                 }
                 automatic.manualProgress("正在检查已关联相机的控制连接")
-                bluetoothPairing.awaitCurrent()
-                val saved = settings.state.value
-                check(saved.controlAddress.isNotBlank()) { "请先在设备设置中选择相机的 BLE 控制设备" }
-                val control = ble.state.value
-                if (!bluetoothDataReady(control.authenticated, control.systemPaired, control.pairingInProgress) ||
-                    control.connectedAddress != saved.controlAddress) {
-                    automatic.manualProgress("正在重新发现并连接已关联相机")
-                    bluetoothPairing.connect(BleCamera(saved.controlAddress, saved.controlName),
-                        rediscover = true, initializePairing = false).join()
-                }
-                currentCoroutineContext().ensureActive()
-                val connected = ble.state.value
-                check(bluetoothDataReady(connected.authenticated, connected.systemPaired, connected.pairingInProgress)) {
-                    connected.message
-                }
+                awaitSavedControl("请先在设备设置中选择相机的 BLE 控制设备") { automatic.manualProgress("正在重新发现并连接已关联相机") }
                 automatic.manualProgress("正在等待蓝牙通道并检查待传照片")
                 result = automatic.checkBluetoothOnce()
-            } catch (cancelled: CancellationException) { throw cancelled }
+            } catch (stop: CancellationException) { throw stop }
             catch (error: Exception) {
                 Log.w("OpenBridgeBluetooth", "manual transfer check failed", error)
                 result = "检查未完成：${error.message ?: "请重试"}"
@@ -574,10 +530,9 @@ class CameraController private constructor(private val context: Context) {
         disconnectWifi()
         releaseWifiPreference()
         retryWifi = null
-        mutableState.update { it.copy(manuallyDisconnected = false) }
+        clearManualDisconnect()
         val control = ble.state.value
-        val ready = bluetoothDataReady(control.authenticated, control.systemPaired, control.pairingInProgress)
-        if (!retry && ready && control.connectedAddress == saved.controlAddress) {
+        if (!retry && control.dataReady && control.connectedAddress == saved.controlAddress) {
             CameraService.start(context)
             automatic.allowStandbyReconnect(true)
         } else connectSavedControl()
@@ -586,7 +541,7 @@ class CameraController private constructor(private val context: Context) {
     @Synchronized
     fun connectSavedControl() {
         if (settings.state.value.sonySelected) return
-        mutableState.update { it.copy(manuallyDisconnected = false) }
+        clearManualDisconnect()
         val address = settings.state.value.controlAddress
         check(address.isNotBlank()) { "请先选择 BLE 控制设备" }
         CameraService.start(context)
@@ -596,104 +551,15 @@ class CameraController private constructor(private val context: Context) {
     }
 
     fun resumeAutomaticDownloads() {
-        mutableState.update { it.copy(manuallyDisconnected = false) }
+        clearManualDisconnect()
         CameraService.start(context)
         automatic.allowStandbyReconnect(true)
     }
 
     fun resumeLocationSync() {
-        sonyLocationStopped = false
-        mutableState.update { it.copy(manuallyDisconnected = false) }
+        location.sonyStopped = false
+        clearManualDisconnect()
     }
-
-    internal suspend fun prepareLocation(owner: Any, resume: Boolean): CameraLocationChannel? = locationWrites.withLock {
-        val previous = locationTarget
-        if (previous != null && previous.owner === owner && previous.isCurrent()) {
-            previous.prepare(resume)
-            return@withLock previous
-        }
-        locationTarget = null
-        previous?.clear()
-        val selected = settings.state.value
-        fun selectionCurrent(): Boolean {
-            val latest = settings.state.value
-            if (!latest.locationSync || state.value.manuallyDisconnected || (latest.sonySelected && sonyLocationStopped)) return false
-            return latest.sonySelected == selected.sonySelected && latest.selectedAddress == selected.selectedAddress
-        }
-        if (!selectionCurrent()) return@withLock null
-        val channel = if (selected.sonySelected) {
-            check(selected.sonyAddress.isNotBlank()) { "请先添加索尼相机" }
-            // Opening the location service only uses bonded BLE; it never requests a hotspot or a Wi-Fi session.
-            val session = sony.location(selected.sonyAddress)
-            object : CameraLocationChannel(owner, sony = true) {
-                override fun isCurrent() = selectionCurrent() && this@CameraController.sony.isCurrent(session)
-                override fun requested() = !session.locationSync.paused
-                override suspend fun prepare(resume: Boolean) = session.locationSync.prepare(resume)
-                override suspend fun send(fix: CameraLocationFix): String {
-                    session.locationSync.send(fix, ::isCurrent)
-                    return "索尼蓝牙"
-                }
-                override suspend fun clear() = session.locationSync.stop()
-            }
-        } else {
-            val bleSession = ble.locationSession()
-            val wifiSession = link
-            val generation = connectionGeneration
-            if (bleSession != null && ble.state.value.connectedAddress == selected.controlAddress) {
-                object : CameraLocationChannel(owner) {
-                    private var sent = false
-                    override fun isCurrent() = selectionCurrent() && ble.locationSession() == bleSession
-                    override fun requested() = ble.state.value.locationRequested
-                    override suspend fun send(fix: CameraLocationFix): String {
-                        sent = true
-                        ble.updateLocation(locationPayload(fix), bleSession)
-                        return "BLE"
-                    }
-                    override suspend fun clear() {
-                        if (sent && ble.locationSession() == bleSession) ble.updateLocation(locationPayload(null), bleSession)
-                        sent = false
-                    }
-                }
-            } else if (wifiSession?.connected == true && wifiSession.supportsLocation()) {
-                object : CameraLocationChannel(owner) {
-                    private var sent = false
-                    private fun sameSession() = link === wifiSession && connectionGeneration == generation && wifiSession.connected
-                    override fun isCurrent() = selectionCurrent() && sameSession()
-                    override fun requested() = true
-                    override suspend fun send(fix: CameraLocationFix): String = requests.withLock {
-                        check(isCurrent()) { "相机会话已更换" }
-                        sent = true
-                        wifiSession.updateLocation(locationPayload(fix))
-                        "Wi-Fi"
-                    }
-                    override suspend fun clear() = requests.withLock {
-                        if (sent && sameSession()) wifiSession.updateLocation(locationPayload(null))
-                        sent = false
-                    }
-                }
-            } else return@withLock null
-        }
-        locationTarget = channel
-        check(channel.isCurrent()) { "位置同步目标已变化" }
-        channel.prepare(resume)
-        channel
-    }
-
-    internal suspend fun syncLocation(channel: CameraLocationChannel, fix: CameraLocationFix): String = locationWrites.withLock {
-        check(locationTarget === channel && channel.isCurrent()) { "位置同步目标已变化" }
-        check(fix.fresh(SystemClock.elapsedRealtimeNanos(), channel.maxAgeNanos)) { "定位已过期，等待新的位置" }
-        channel.send(fix)
-    }
-
-    internal suspend fun clearLocation(owner: Any) = locationWrites.withLock {
-        val target = locationTarget?.takeIf { it.owner === owner } ?: return@withLock
-        locationTarget = null
-        target.clear()
-    }
-
-    private fun locationPayload(fix: CameraLocationFix?): ByteArray = if (fix == null) {
-        NativePtp.location(0.0, 0.0, Double.NaN, 0, 0, false)
-    } else NativePtp.location(fix.latitude, fix.longitude, fix.altitude, fix.timeMillis, 0, true)
 
     fun beginRegistration() {
         scope.launch {
@@ -748,12 +614,7 @@ class CameraController private constructor(private val context: Context) {
 
     suspend fun clearImportList(selectedIds: Set<String>? = null): Unit = withContext(Dispatchers.IO) {
         val source = state.value.sourceId.takeIf { state.value.connected }
-        val pending = state.value.tasks.any {
-            it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING) &&
-                (source == null || it.photo.cameraIdentity == source)
-                && (selectedIds == null || it.photo.asset.id in selectedIds)
-        }
-        check(!pending) { "请先完成或取消待传输任务，再清空选片列表" }
+        check(!downloads.hasPending(source, selectedIds)) { "请先完成或取消待传输任务，再清空选片列表" }
         browser.clearImportList(source, selectedIds)
     }
 
@@ -765,7 +626,7 @@ class CameraController private constructor(private val context: Context) {
 
     private fun catalogProgress(progress: BrowseProgress) {
         mutableState.update { it.withCatalogProgress(progress) }
-        if (!progress.busy && state.value.connected && progress.generation == state.value.generation) wake.trySend(Unit)
+        if (!progress.busy && state.value.connected && progress.generation == state.value.generation) downloads.wake()
     }
 
     suspend fun enqueue(ids: Set<String>): Unit = withContext(Dispatchers.IO) {
@@ -773,254 +634,14 @@ class CameraController private constructor(private val context: Context) {
         val photos = ids.mapNotNull { remote[it] }
         check(photos.size == ids.size) { "请连接原相机并刷新目录后再添加导入" }
         val variant = if (active().make == CameraMake.NIKON) settings.state.value.manualVariant else DownloadVariant.ORIGINAL
-        enqueuePhotos(photos, variant, false)
+        downloads.enqueue(photos, variant, automatic = false)
     }
 
-    private suspend fun enqueuePhotos(photos: List<RemotePhoto>, variant: DownloadVariant, automatic: Boolean) {
-        var queued = emptyList<CameraDownload>()
-        taskLock.withLock {
-            val existing = state.value.tasks.filter { it.status != DownloadStatus.COMPLETED && it.status != DownloadStatus.CANCELLED }
-                .map { it.photo.asset.id to it.variant }.toSet()
-            val added = photos.filter { (it.asset.id to variant) !in existing }.map {
-                CameraDownload(UUID.randomUUID().toString(), it, variant = variant, automatic = automatic)
-            }
-            queued = added
-            val tasks = state.value.tasks + added
-            journal.save(tasks)
-            mutableState.update { it.copy(tasks = tasks) }
-        }
-        try {
-            if (queued.isNotEmpty()) publish(queued.map {
-                it.photo.asset.copy(downloadState = if (variant == DownloadVariant.ORIGINAL) DownloadState.QUEUED else DownloadState.REMOTE)
-            })
-        } finally { wake.trySend(Unit) }
-        Unit
-    }
-
-    fun pause(paused: Boolean) { mutableState.update { it.copy(paused = paused) }; if (!paused) wake.trySend(Unit) }
-
-    suspend fun clearDownloadHistory() = withContext(Dispatchers.IO) {
-        val removed = taskLock.withLock {
-            val ended = state.value.tasks.filter { it.canClearHistory }
-            val remaining = state.value.tasks.filterNot { it.canClearHistory }
-            journal.save(remaining)
-            mutableState.update { it.copy(tasks = remaining) }
-            cancelled.removeAll(ended.map { it.id }.toSet())
-            ended
-        }
-        val noLongerQueued = removed.filter { it.status == DownloadStatus.WAITING && it.variant == DownloadVariant.ORIGINAL }
-            .map { it.photo.asset.copy(downloadState = DownloadState.REMOTE) }
-        if (noLongerQueued.isNotEmpty()) publish(noLongerQueued, resetQueued = true)
-    }
-    fun cancel(id: String) {
-        cancelled += id
-        if (state.value.tasks.any { it.id == id && it.channel == DownloadChannel.BLUETOOTH && it.status == DownloadStatus.RUNNING }) {
-            automatic.cancelActiveBluetooth()
-        }
-        scope.launch {
-            val task = state.value.tasks.find { it.id == id } ?: return@launch
-            if (task.status == DownloadStatus.RUNNING) updateTask(id) { it.copy(message = "正在取消导入") }
-            if (task.status == DownloadStatus.QUEUED || task.status == DownloadStatus.WAITING ||
-                (task.status == DownloadStatus.CANCELLED && task.outputUri != null)) {
-                val removed = removeOutput(task.outputUri)
-                updateTask(id) {
-                    it.copy(status = DownloadStatus.CANCELLED, outputUri = if (removed) null else it.outputUri,
-                        message = if (removed) "已取消" else "已取消，未完成文件待清理")
-                }
-                if (task.variant == DownloadVariant.ORIGINAL) {
-                    publish(listOf(task.photo.asset.copy(downloadState = DownloadState.REMOTE)), resetQueued = true)
-                }
-            }
-        }
-    }
-    fun retry(id: String) {
-        scope.launch {
-            val task = state.value.tasks.find { it.id == id } ?: return@launch
-            check(task.status in setOf(DownloadStatus.WAITING, DownloadStatus.CANCELLED)) { "只有中断或取消的任务可以重试" }
-            if (task.status == DownloadStatus.CANCELLED) {
-                val removed = removeOutput(task.outputUri)
-                if (!removed) { updateTask(id) { it.copy(message = "请先清理上次的未完成副本") }; return@launch }
-                cancelled -= id
-                updateTask(id) { it.copy(status = DownloadStatus.WAITING, outputUri = null, received = 0, payloadBytes = 0) }
-            }
-            if (task.channel == DownloadChannel.BLUETOOTH) {
-                checkBluetoothTransfers()
-                return@launch
-            }
-            val current = remote[task.photo.asset.id]
-            if (!state.value.connected || current == null || current.cameraIdentity != identity || task.photo.cameraIdentity != identity) {
-                val message = if (state.value.connected) "请刷新导入列表；若照片已重新编目，请重新选择原片导入"
-                    else "请连接原来的相机，刷新导入列表后重试"
-                updateTask(id) { it.copy(status = DownloadStatus.WAITING, message = message) }
-                return@launch
-            }
-            cancelled -= id
-            updateTask(id) { it.copy(photo = current, status = DownloadStatus.QUEUED, message = "等待重试") }
-            wake.trySend(Unit)
-        }
-    }
-
-    private suspend fun download(task: CameraDownload) {
-        var current = task
-        try {
-            if (task.id in cancelled) throw CancellationException("已取消导入")
-            val photo = remote[task.photo.asset.id] ?: error("目录尚未重新确认，请刷新相机目录后重试")
-            check(photo.cameraIdentity == identity && task.photo.cameraIdentity == identity) { "已连接的相机与任务不一致" }
-            val transferSession = active()
-            val latest = requests.withLock {
-                check(active() === transferSession) { "相机会话已更换" }
-                transferSession.objectInfo(photo.handle, verify = true)
-            }
-            check(latest.getString("name") == photo.asset.name && latest.getLong("size") == photo.asset.sizeBytes &&
-                latest.getString("captured") == photo.captured) { "相机文件已改变，不能继续旧任务" }
-            if (latest.has("sonyMedia")) {
-                check(cameraObjectId(latest, photo.cameraIdentity) == task.photo.asset.id) {
-                    "存储卡或原片已变化，请刷新后重新选择原片"
-                }
-            }
-            if (task.variant == DownloadVariant.CAMERA_JPEG) {
-                updateTask(task.id) { it.copy(status = DownloadStatus.RUNNING, message = "正在通过 Wi-Fi 获取机内便携 JPEG") }
-                val bytes = requests.withLock {
-                    check(active() === transferSession) { "相机会话已更换" }
-                    transferSession.portableJpeg(photo.handle)
-                }
-                val complete = jpegSaver.save(task.copy(photo = photo), bytes, { change -> updateTask(task.id, change) }, { task.id in cancelled }) {
-                    requests.withLock {
-                        if (link === transferSession && transferSession.connected) transferSession.nikonPhotoHeader(photo) else null
-                    }?.sourceGeometry(photo.asset.format)
-                }
-                publish(listOf(complete))
-                updateTask(task.id) { it.copy(status = DownloadStatus.COMPLETED, message = "便携 JPEG 已保存；原片未导入") }
-                return
-            }
-            check(photo.asset.sizeBytes > 0 && (latest.has("sonyMedia") || photo.asset.sizeBytes != 0xffff_ffffL)) {
-                "当前机身未提供可验证的文件大小，暂不导入此文件"
-            }
-            var output = task.outputUri?.let(Uri::parse)
-            if (output == null) {
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, photo.asset.name)
-                    put(MediaStore.MediaColumns.MIME_TYPE, requireNotNull(photoMimeType(photo.asset.name)) { "无法确定原片格式" })
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, GalleryPublisher.relativePath)
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
-                }
-                val collection = GalleryPublisher.collection
-                output = context.contentResolver.insert(collection, values) ?: error("无法创建待导入文件")
-                current = task.copy(outputUri = output.toString())
-                try { updateTask(task.id) { current } } catch (error: Exception) {
-                    context.contentResolver.delete(output, null, null); throw error
-                }
-            }
-            val uri = output
-            updateTask(task.id) { it.copy(status = DownloadStatus.RUNNING, message = "正在接收原片") }
-            fileReceiver.receive(photo, transferSession, uri, task.received, object : CameraTransferProgress {
-                override fun checkCancelled() {
-                    if (task.id in cancelled) throw CancellationException("已取消导入")
-                }
-                override fun received(bytes: Long) {
-                    mutableState.update { state ->
-                        state.copy(tasks = state.tasks.map { if (it.id == task.id) it.copy(received = bytes) else it })
-                    }
-                }
-                override suspend fun checkpoint(bytes: Long, message: String) {
-                    updateTask(task.id) { it.copy(received = bytes, message = message) }
-                }
-                override suspend fun awaitResume() = awaitDownloadResume(task.id)
-            })
-            if (task.id in cancelled) throw CancellationException("已取消导入")
-            gallery.publish(uri)
-            val completed = repository.readCameraDownload(photo.asset, uri)
-            publish(listOf(completed))
-            updateTask(task.id) { it.copy(status = DownloadStatus.COMPLETED, message = "原片已保存") }
-            Log.i("OpenBridgeCamera", "download stage=complete; bytes=${photo.asset.sizeBytes}")
-        } catch (error: Exception) {
-            Log.w("OpenBridgeCamera", "download interrupted; cancelled=${task.id in cancelled}", error)
-            val record = state.value.tasks.find { it.id == task.id } ?: current
-            if (task.id in cancelled) {
-                val deleted = removeOutput(record.outputUri)
-                updateTask(task.id) { it.copy(status = DownloadStatus.CANCELLED, outputUri = if (deleted) null else it.outputUri,
-                    message = if (deleted) "已取消" else "已取消，未完成文件清理失败") }
-                if (task.variant == DownloadVariant.ORIGINAL) {
-                    publish(listOf(task.photo.asset.copy(downloadState = DownloadState.REMOTE)), resetQueued = true)
-                }
-            } else updateTask(task.id) { it.copy(status = DownloadStatus.WAITING, message = error.message ?: "连接中断，请重试") }
-        }
-    }
-
-    private suspend fun awaitDownloadResume(id: String) {
-        if (state.value.paused) {
-            mutableState.update { it.copy(transmissionPaused = true) }
-            updateTask(id) { it.copy(message = "已暂停，保留断点") }
-            try { state.first { !it.paused || !it.connected || id in cancelled } }
-            finally { mutableState.update { it.copy(transmissionPaused = false) } }
-            if (id in cancelled) throw CancellationException("已取消导入")
-        }
-    }
-
-    private suspend fun receiveBluetoothCopy(photo: RemotePhoto, bytes: () -> ByteArray) {
-        val task = taskLock.withLock {
-            val previous = state.value.tasks.firstOrNull {
-                val sameFile = it.photo.asset.id == photo.asset.id ||
-                    (photo.asset.cameraFileKey != null && it.photo.asset.cameraFileKey == photo.asset.cameraFileKey)
-                it.channel == DownloadChannel.BLUETOOTH && sameFile && it.status == DownloadStatus.WAITING
-            }
-            val next = previous?.copy(photo = photo, status = DownloadStatus.RUNNING, message = "蓝牙正在接收便携 JPEG")
-                ?: CameraDownload(UUID.randomUUID().toString(), photo, DownloadStatus.RUNNING, message = "蓝牙正在接收便携 JPEG",
-                    variant = DownloadVariant.CAMERA_JPEG, automatic = true, channel = DownloadChannel.BLUETOOTH)
-            val tasks = state.value.tasks.filterNot { it.id == next.id } + next
-            journal.save(tasks)
-            mutableState.update { it.copy(tasks = tasks) }
-            next
-        }
-        try {
-            currentCoroutineContext().ensureActive()
-            if (task.id in cancelled) throw CancellationException("已取消")
-            publish(listOf(photo.asset))
-            val completed = jpegSaver.save(task, bytes(), { change -> updateTask(task.id, change) }, { task.id in cancelled })
-            publish(listOf(completed))
-            updateTask(task.id) { it.copy(status = DownloadStatus.COMPLETED, message = "蓝牙便携 JPEG 已保存；原片未导入") }
-        } catch (error: Exception) {
-            withContext(NonCancellable) {
-                val stopped = task.id in cancelled
-                val output = state.value.tasks.find { it.id == task.id }?.outputUri
-                val removed = if (stopped) removeOutput(output) else false
-                updateTask(task.id) { it.copy(status = if (stopped) DownloadStatus.CANCELLED else DownloadStatus.WAITING,
-                    outputUri = if (stopped && removed) null else it.outputUri,
-                    message = if (stopped) { if (removed) "已取消" else "已取消，未完成副本待清理" }
-                        else "蓝牙传图中断：${error.message}；小图重试会重新接收") }
-            }
-            throw error
-        }
-    }
-
-    private suspend fun updateTask(id: String, change: (CameraDownload) -> CameraDownload) = taskLock.withLock {
-        val tasks = state.value.tasks.map { if (it.id == id) change(it) else it }
-        journal.save(tasks)
-        mutableState.update { it.copy(tasks = tasks) }
-    }
-
-    suspend fun clearImportHistory() {
-        // Queue transitions cannot pass the guard while the shared repository mutex and database transaction clear history.
-        taskLock.withLock {
-            repository.clearImportHistory { importHistoryBlockReason(state.value.tasks, autoState.value) != null }
-        }
-        changed.emit(Unit)
-    }
-
-    private fun removeOutput(value: String?): Boolean {
-        if (value == null) return true
-        val uri = Uri.parse(value)
-        return try {
-            if (context.contentResolver.delete(uri, null, null) > 0) true
-            else context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { !it.moveToFirst() } ?: false
-        } catch (_: FileNotFoundException) { true }
-        catch (_: Exception) { false }
-    }
-
-    private suspend fun publish(assets: List<PhotoAsset>, resetQueued: Boolean = false) {
-        repository.mergeCameraAssets(assets, resetQueued)
-        changed.emit(Unit)
-    }
+    fun pause(paused: Boolean) = downloads.pause(paused)
+    fun cancel(id: String) = downloads.cancel(id, automatic::cancelActiveBluetooth)
+    fun retry(id: String) = downloads.retry(id, ::checkBluetoothTransfers)
+    suspend fun clearDownloadHistory() = downloads.clearHistory()
+    suspend fun clearImportHistory() = downloads.clearImportHistory { autoState.value }
 
     private fun active(): PtpLink = link?.takeIf { it.connected } ?: error("相机未连接")
 

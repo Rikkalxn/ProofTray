@@ -67,9 +67,9 @@ private fun BleState.record(message: String): BleState = copy(message = message,
 
 @SuppressLint("MissingPermission")
 @Suppress("DEPRECATION")
-internal class NikonBle(private val context: Context, private val scope: CoroutineScope) {
+internal class NikonBle(private val context: Context, private val scope: CoroutineScope, private val identities: CameraIdentityStore) {
     private val adapter = context.getSystemService(BluetoothManager::class.java).adapter
-    private val mutableState = MutableStateFlow(BleState(adapterEnabled = runCatching { adapter?.isEnabled == true }.getOrDefault(true)))
+    private val mutableState = MutableStateFlow(BleState(adapterEnabled = adapter?.isEnabled == true))
     val state = mutableState.asStateFlow()
     private val mutableTransferRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val transferRequests = mutableTransferRequests.asSharedFlow()
@@ -95,13 +95,13 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
     private val adapterEvents = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
-                val enabled = runCatching { adapter?.isEnabled == true }.getOrDefault(false)
+                val enabled = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR) == BluetoothAdapter.STATE_ON
                 if (!enabled) disconnect()
                 mutableState.update { it.copy(adapterEnabled = enabled).record(if (enabled) "手机蓝牙已开启，等待连接" else "手机蓝牙已关闭") }
             } else if (intent.action == BluetoothDevice.ACTION_BOND_STATE_CHANGED) {
                 val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
-                if (device.address != state.value.classicAddress ||
-                    !runCatching { device.bondState == BluetoothDevice.BOND_NONE }.getOrDefault(false)) return
+                val bond = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
+                if (device.address != state.value.classicAddress || bond != BluetoothDevice.BOND_NONE) return
                 disconnect()
                 mutableState.update { it.copy(systemPaired = false).record("相机的系统配对已移除，请重新配对") }
             }
@@ -282,17 +282,11 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
                 connection.open(discovered[address] ?: adapter.getRemoteDevice(address))
                 step(token, "已发现相机服务，正在订阅握手响应")
                 connection.subscribe()
-                val preferences = context.getSharedPreferences("camera-identity", Context.MODE_PRIVATE)
                 val start = ByteArray(17).also { SecureRandom().nextBytes(it); it[0] = 1 }
                 val identity = synchronized(this@NikonBle) {
                     if (generation != token || session !== connection || !connection.live) throw endedSession(token)
-                    preferences.getString("bleIdentity", null)?.let { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }
-                        ?: ByteArray(8).also {
-                            SecureRandom().nextBytes(it); it[0] = 1
-                            preferences.edit().putString("bleIdentity", android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP)).apply()
-                        }
+                    identities.bleIdentityOrCreate()
                 }
-                check(identity.size == 8)
                 identity.copyInto(start, 9)
                 step(token, "正在验证相机身份：发送请求")
                 connection.write("2000", start)
@@ -313,25 +307,16 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
                 }
                 Log.i("OpenBridgeBluetooth", "authentication stage 4 accepted; session key derived")
                 step(token, "身份验证通过，正在读取相机信息")
-                val serverName = try { connection.read("2003").toString(Charsets.UTF_8).substringBefore('\u0000').trim() }
-                catch (cancelled: CancellationException) { throw cancelled }
-                catch (error: BleTransportException) { throw error }
-                catch (_: Exception) { "" }
+                val serverName = connection.readOptional("2003", "") { it.toString(Charsets.UTF_8).substringBefore('\u0000').trim() }
                 step(token, "正在读取蓝牙能力与相机信息")
-                val features = try {
-                    val feature = connection.read("2009")
-                    if (feature.size >= 4) ByteBuffer.wrap(feature).order(ByteOrder.LITTLE_ENDIAN).int else 0
-                } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-                catch (error: BleTransportException) { throw error }
-                catch (_: Exception) { 0 }
+                val features = connection.readOptional("2009", 0) {
+                    if (it.size >= 4) ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).int else 0
+                }
                 synchronized(this@NikonBle) {
                     if (generation != token || !connection.live) throw endedSession(token)
                     featureFlags = features
                 }
-                val serial = try { cameraSerial(connection.read("200b").toString(Charsets.UTF_8)).orEmpty() }
-                catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-                catch (error: BleTransportException) { throw error }
-                catch (_: Exception) { "" }
+                val serial = connection.readOptional("200b", "") { cameraSerial(it.toString(Charsets.UTF_8)).orEmpty() }
                 // 2008 is a clock/location/connection request, not an authentication acknowledgement.
                 synchronized(this@NikonBle) {
                     if (generation != token || session !== connection || !connection.live) throw endedSession(token)
@@ -353,6 +338,13 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
         return outcome
     }
 
+    /** Informational characteristics are missing on some bodies; only a lost transport aborts the handshake. */
+    private suspend fun <T> NikonGattSession.readOptional(id: String, fallback: T, decode: (ByteArray) -> T): T = try {
+        decode(read(id))
+    } catch (error: BleTransportException) { throw error }
+    catch (error: CancellationException) { throw error }
+    catch (_: Exception) { fallback }
+
     @Synchronized
     private fun controlRequest(token: Int, bytes: ByteArray) {
         if (generation != token) return
@@ -368,8 +360,7 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
 
     private fun timeSyncAllowed(): Boolean {
         val control = state.value
-        return settings.state.value.requestedTimeSync && control.timeRequested && !control.wifiRequested &&
-            bluetoothDataReady(control.authenticated, control.systemPaired, control.pairingInProgress)
+        return settings.state.value.requestedTimeSync && control.timeRequested && !control.wifiRequested && control.dataReady
     }
 
     private suspend fun syncRequestedTime() {
@@ -486,15 +477,12 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
 
     suspend fun startCameraHotspot(beforeWake: (CameraWifiSettings) -> Unit): CameraWifiSettings {
         val (connection, key) = synchronized(this) {
-            check(bluetoothDataReady(state.value.authenticated, state.value.systemPaired, state.value.pairingInProgress)) {
-                "请先完成相机蓝牙连接"
-            }
+            check(state.value.dataReady) { "请先完成相机蓝牙连接" }
             activeSession() to (sessionKey?.clone() ?: error("蓝牙认证密钥不可用，请重新连接"))
         }
         fun ready(): Boolean {
             val control = state.value
-            return session === connection && connection.live && control.wifiRequested &&
-                bluetoothDataReady(control.authenticated, control.systemPaired, control.pairingInProgress)
+            return session === connection && connection.live && control.wifiRequested && control.dataReady
         }
         try {
             check(ready()) { "Wi-Fi 切换已取消" }
@@ -524,8 +512,7 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
     @Synchronized
     fun locationSession(): Int? {
         val current = state.value
-        if (!bluetoothDataReady(current.authenticated, current.systemPaired, current.pairingInProgress) ||
-            sessionKey == null || session?.let { it.live && it.writable("2007") } != true) return null
+        if (!current.dataReady || sessionKey == null || session?.let { it.live && it.writable("2007") } != true) return null
         if (featureFlags != 0 && featureFlags and (1 shl 7) == 0) return null
         return generation
     }
@@ -546,7 +533,7 @@ internal class NikonBle(private val context: Context, private val scope: Corouti
         acknowledgeConnectionRequest(connection) { !state.value.wifiRequested && !state.value.pairingInProgress }
         check(connection.write("2005", byteArrayOf(2)) {
             val current = state.value
-            !current.wifiRequested && bluetoothDataReady(current.authenticated, current.systemPaired, current.pairingInProgress)
+            !current.wifiRequested && current.dataReady
         }) { "正在配对或使用 Wi-Fi，蓝牙数据传输暂候" }
     }
 

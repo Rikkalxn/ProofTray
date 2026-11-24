@@ -28,6 +28,13 @@ import org.openbridge.app.frame.FrameMetadataReader
 
 internal val editRenderDispatcher = Dispatchers.Default.limitedParallelism(2)
 
+/** Renders for display: cancellation propagates, while low memory and other failures become a message for the preview area. */
+internal inline fun <T> renderOrMessage(lowMemory: String, fallback: String, failed: (String) -> T, render: () -> T): T = try {
+    render()
+} catch (stop: CancellationException) { throw stop }
+catch (_: OutOfMemoryError) { failed(lowMemory) }
+catch (error: Exception) { failed(error.message ?: fallback) }
+
 /** A displayed or background-rendered image can outlive the producer that created it. No consumer owns its pixels exclusively. */
 internal class EditBitmap(val bitmap: Bitmap) : Closeable {
     private var references = 1
@@ -101,6 +108,18 @@ internal data class ColorPreviewSource(
 internal data class LinearSource(val frame: LinearRawPreview? = null, val thumb: LinearRawPreview? = null, val error: String? = null)
 internal data class PhotoEditSource(val normal: ColorPreviewSource, val linear: LinearSource, val values: Map<String, String>, val raw: Boolean)
 
+internal suspend fun EditResources.renderBitmapLook(image: EditBitmap, look: ColorLookSettings, repository: LutRepository): ColorPreviewSource =
+    renderOrMessage("可用内存不足，无法建立调色预览", "调色失败", { close(); ColorPreviewSource(error = it) }) {
+        val rendered = if (look.isIdentity) hold(image) else withContext(editRenderDispatcher) {
+            image.retain().use { lease ->
+                val copy = own(checkNotNull(lease.bitmap.copy(Bitmap.Config.ARGB_8888, true)) { "无法创建调色预览" })
+                repository.apply(copy.bitmap, look)
+                copy
+            }
+        }
+        ColorPreviewSource(rendered, renderedLook = look)
+    }
+
 /** One decode per requested path for the current URI/retry. Neither the selected look nor the editor tab is a decode key. */
 @Composable
 internal fun rememberPhotoEditSource(asset: PhotoAsset, reload: Int): PhotoEditSource = key(asset.uri, reload) {
@@ -108,23 +127,17 @@ internal fun rememberPhotoEditSource(asset: PhotoAsset, reload: Int): PhotoEditS
     val raw = asset.format == MediaFormat.RAW
     val repository = remember(context) { LutRepository.get(context) }
     val linear = if (raw) rememberEditResult(LinearSource()) {
-        try {
+        renderOrMessage("内存不足，无法建立线性预览", "线性 RAW 解码失败", { LinearSource(error = it) }) {
             val frame = LogRenderer.load(context, asset, 1600)
             LinearSource(frame, withContext(editRenderDispatcher) { frame.thumbnail(192) })
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: OutOfMemoryError) { LinearSource(error = "内存不足，无法建立线性预览") }
-        catch (error: Exception) { LinearSource(error = error.message ?: "线性 RAW 解码失败") }
+        }
     } else LinearSource()
     val normal = if (raw) {
         if (linear.error != null) ColorPreviewSource(error = linear.error) else linearLookPreview(linear.frame, ColorLookSettings(), repository)
     } else rememberEditResult(ColorPreviewSource()) {
-        try {
-            withContext(Dispatchers.IO) {
-                ColorPreviewSource(own(PhotoRenderer.decode(context, asset, 1600, mutable = false)))
-            }
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: OutOfMemoryError) { ColorPreviewSource(error = "可用内存不足，无法读取照片") }
-        catch (error: Exception) { ColorPreviewSource(error = error.message ?: "无法读取照片") }
+        renderOrMessage("可用内存不足，无法读取照片", "无法读取照片", { ColorPreviewSource(error = it) }) {
+            withContext(Dispatchers.IO) { ColorPreviewSource(own(PhotoRenderer.decode(context, asset, 1600, mutable = false))) }
+        }
     }
     val values by produceState<Map<String, String>>(emptyMap()) {
         value = try { withContext(Dispatchers.IO) { FrameMetadataReader.read(context, asset) } }
@@ -145,10 +158,9 @@ internal fun linearLookPreview(frame: LinearRawPreview?, look: ColorLookSettings
             val packed = table ?: return@rememberEditResult ColorPreviewSource()
             if (frame == null) return@rememberEditResult ColorPreviewSource()
             delay(60)
-            try { ColorPreviewSource(own(RawPhotoDecoder.preview(frame, packed.getOrThrow(), look)), renderedLook = look) }
-            catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: OutOfMemoryError) { ColorPreviewSource(error = "RAW 预览内存不足") }
-            catch (error: Exception) { ColorPreviewSource(error = error.message ?: "RAW 预览失败") }
+            renderOrMessage("RAW 预览内存不足", "RAW 预览失败", { ColorPreviewSource(error = it) }) {
+                ColorPreviewSource(own(RawPhotoDecoder.preview(frame, packed.getOrThrow(), look)), renderedLook = look)
+            }
         }
     }
 }
@@ -167,17 +179,6 @@ internal fun rememberGradedPhoto(source: PhotoEditSource, look: ColorLookSetting
         if (!requested) return@rememberEditResult ColorPreviewSource()
         val image = source.normal.image ?: return@rememberEditResult ColorPreviewSource(error = source.normal.error)
         delay(60)
-        try {
-            if (look.isIdentity) ColorPreviewSource(hold(image), renderedLook = look)
-            else withContext(editRenderDispatcher) {
-                image.retain().use { lease ->
-                    val copy = own(checkNotNull(lease.bitmap.copy(Bitmap.Config.ARGB_8888, true)) { "无法创建调色预览" })
-                    repository.apply(copy.bitmap, look)
-                    ColorPreviewSource(copy, renderedLook = look)
-                }
-            }
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: OutOfMemoryError) { close(); ColorPreviewSource(error = "可用内存不足，无法建立调色预览") }
-        catch (error: Exception) { close(); ColorPreviewSource(error = error.message ?: "调色失败") }
+        renderBitmapLook(image, look, repository)
     }
 }

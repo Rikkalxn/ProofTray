@@ -12,13 +12,13 @@ import org.openbridge.app.domain.CatalogResult
 import org.openbridge.app.domain.FilterSpec
 import org.openbridge.app.domain.PhotoAsset
 
-/** Owns query scheduling and stale-result rejection; selection and page state stay with the ViewModel. */
+/** Runs the latest query off the UI thread and discards superseded results. */
 internal class CatalogQueryRunner(
     scope: CoroutineScope, private val onRunning: (Boolean) -> Unit,
     private val onResult: (CatalogResult) -> Unit, private val onFailure: (Throwable) -> Unit
 ) {
-    private data class Input(val assets: List<PhotoAsset>, val filter: FilterSpec, val collapseStacks: Boolean)
-    private val requests = MutableStateFlow(Input(emptyList(), FilterSpec(), true))
+    private data class Input(val assets: List<PhotoAsset>, val filter: FilterSpec, val collapseStacks: Boolean, val pageRevision: Long)
+    private val requests = MutableStateFlow(Input(emptyList(), FilterSpec(), true, 0))
 
     init {
         scope.launch {
@@ -38,7 +38,9 @@ internal class CatalogQueryRunner(
         }
     }
 
-    fun submit(assets: List<PhotoAsset>, filter: FilterSpec, collapseStacks: Boolean) {
-        requests.value = Input(assets, filter, collapseStacks)
+    fun submit(assets: List<PhotoAsset>, filter: FilterSpec, collapseStacks: Boolean, catalogCleared: Boolean) {
+        // A new page needs a result even when it contains the same photos and uses the same filter.
+        val revision = requests.value.pageRevision
+        requests.value = Input(assets, filter, collapseStacks, if (catalogCleared) revision + 1 else revision)
     }
 }

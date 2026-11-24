@@ -181,16 +181,14 @@ internal fun FrameEditorScreen(
     val preview = rememberEditResult(FramePreviewResult(), session, current, revision, values, editor.enabled) {
         if (session == null || !editor.enabled) return@rememberEditResult FramePreviewResult()
         delay(35)
-        try {
+        renderOrMessage("边框预览内存不足", "无法绘制边框", { FramePreviewResult(error = it) }) {
             withContext(editRenderDispatcher) {
                 val design = current.forPhoto(width, height)
                 FrameMemoryBudget.check(FrameMemoryBudget.output(width, height, design, 1200), width.toLong() * height, design)
                 val rendered = session.render(repository.snapshot(current, values), 1200, cancelled = { coroutineContext.ensureActive() })
                 FramePreviewResult(rendered, current, own(rendered.bitmap), source = source.image, metadata = values, revision = revision)
             }
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: OutOfMemoryError) { FramePreviewResult(error = "边框预览内存不足") }
-        catch (error: Exception) { FramePreviewResult(error = error.message ?: "无法绘制边框") }
+        }
     }
     val previewBitmap = rememberEditBitmap(preview.image)
     val presets by produceState<List<FramePreset>>(emptyList(), revision, state.deletedFrameTemplateIds) {

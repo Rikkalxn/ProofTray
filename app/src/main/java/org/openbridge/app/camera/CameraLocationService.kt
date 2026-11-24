@@ -89,7 +89,7 @@ class CameraLocationService : Service() {
                 if (manual) failures = 0
                 sampleRequested = false
                 try {
-                    val channel = withContext(Dispatchers.IO) { controller.prepareLocation(owner, manual) }
+                    val channel = withContext(Dispatchers.IO) { controller.location.prepare(owner, manual) }
                     if (channel == null) {
                         sampleRequested = sampleRequested || manual
                         report("等待支持位置同步的相机连接")
@@ -97,7 +97,7 @@ class CameraLocationService : Service() {
                         continue
                     }
                     if (!channel.requested() && !manual) {
-                        withContext(Dispatchers.IO) { controller.clearLocation(owner) }
+                        withContext(Dispatchers.IO) { controller.location.clear(owner) }
                         report(if (channel.sony) "机身已暂停位置关联，请在机身确认后点「恢复同步」" else "等待相机位置请求，GPS 处于待机")
                         wake.receive()
                         continue
@@ -108,14 +108,14 @@ class CameraLocationService : Service() {
                     report("获取当前位置")
                     val fix = freshLocation(channel.maxAgeNanos)
                     if (fix == null) {
-                        withContext(Dispatchers.IO) { controller.clearLocation(owner) }
+                        withContext(Dispatchers.IO) { controller.location.clear(owner) }
                         if (!channel.isCurrent() || (channel.sony && !channel.requested()) || sampleRequested) continue
                         failures = (failures + 1).coerceAtMost(3)
                         report("未取得新鲜且准确的位置；已停止发送旧坐标")
                     } else {
                         val route = withContext(Dispatchers.IO) {
                             val altitude = fix.altitude.takeIf { fix.hasAltitude() && it.isFinite() && kotlin.math.abs(it) <= 32767 } ?: Double.NaN
-                            controller.syncLocation(channel,
+                            controller.location.sync(channel,
                                 CameraLocationFix(fix.latitude, fix.longitude, altitude, fix.time, fix.elapsedRealtimeNanos))
                         }
                         val message = "已通过 $route 同步位置，精度约 ${fix.accuracy.toInt()} 米"
@@ -125,7 +125,7 @@ class CameraLocationService : Service() {
                     }
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (error: Exception) {
-                    runCatching { withContext(Dispatchers.IO) { controller.clearLocation(owner) } }
+                    runCatching { withContext(Dispatchers.IO) { controller.location.clear(owner) } }
                     failures = (failures + 1).coerceAtMost(3)
                     report("位置同步等待重试：${error.message}")
                 }
@@ -188,7 +188,7 @@ class CameraLocationService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onDestroy() {
         scope.cancel()
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { runCatching { controller.clearLocation(owner) } }
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { runCatching { controller.location.clear(owner) } }
         mutableState.value = mutableState.value.copy(running = false, message = startupFailure ?: "位置同步已停止")
         super.onDestroy()
     }

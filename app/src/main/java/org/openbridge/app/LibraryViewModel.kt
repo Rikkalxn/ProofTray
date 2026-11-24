@@ -23,12 +23,10 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.openbridge.app.data.BatchExportManager
 import org.openbridge.app.data.PhotoRepository
-import org.openbridge.app.domain.CatalogResult
 import org.openbridge.app.domain.ExportOptions
 import org.openbridge.app.domain.ExportPreferences
 import org.openbridge.app.domain.validateLogExport
 import org.openbridge.app.domain.ExportStatus
-import org.openbridge.app.domain.FilterSpec
 import org.openbridge.app.domain.PhotoAsset
 import org.openbridge.app.domain.PickState
 import org.openbridge.app.domain.SavedFilter
@@ -44,20 +42,20 @@ import org.openbridge.app.frame.withFrameInitialization
 import org.openbridge.app.domain.LutUsage
 import org.openbridge.app.domain.ColorPreset
 import org.openbridge.app.domain.PhotoCollection
-import org.openbridge.app.domain.PhotoBrowserState
 import org.openbridge.app.domain.LibrarySection
-import org.openbridge.app.domain.ImportVisibility
 import org.openbridge.app.domain.collectionAssets
 import org.openbridge.app.data.AppSettingsRepository
 import org.openbridge.app.domain.PowerProfile
 import org.openbridge.app.domain.BluetoothRole
 import org.openbridge.app.domain.AutoDownloadKind
 import org.openbridge.app.domain.DownloadVariant
-import org.openbridge.app.domain.selectionAfterQuery
+import org.openbridge.app.domain.selectedPhotos
 import org.openbridge.app.camera.CameraLocationService
-import org.openbridge.app.camera.DownloadStatus
+import org.openbridge.app.data.MediaDeleteTarget
 import org.openbridge.app.data.MediaDeletion
 import org.openbridge.app.data.PhotoPreviewLoader
+import org.openbridge.app.domain.ExportFormat
+import org.openbridge.app.frame.FrameRepository
 import org.openbridge.app.data.withGeometryFrom
 
 class LibraryViewModel(application: Application) : AndroidViewModel(application) {
@@ -75,19 +73,8 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
     private var operationCount = 0
     private var queryRunning = false
     private var pendingExport: PendingExport? = null
-    private var viewerRetainedSelection = emptySet<String>()
-    private val catalogQuery = CatalogQueryRunner(viewModelScope,
-        onRunning = { queryRunning = it; updateLoading() },
-        onResult = { catalog ->
-            val visibleIds = catalog.groups.flatMap { it.members }.mapTo(hashSetOf()) { it.id }
-            mutableState.update { it.copy(catalog = catalog,
-                selectedIds = selectionAfterQuery(it.selectedIds, visibleIds, it.assets.mapTo(hashSetOf()) { photo -> photo.id },
-                    viewerRetainedSelection)) }
-        },
-        onFailure = { error ->
-            showError(if (error is LinkageError) "C++ 筛选库未能加载，请检查应用的原生库打包：${error.message}"
-                else "筛选失败：${error.message ?: "无法读取目录"}")
-        })
+    internal val browser = LibraryBrowser(viewModelScope, mutableState, camera::setCatalogSort,
+        onQueryRunning = { queryRunning = it; updateLoading() }, onError = { showError(it) })
 
     init {
         viewModelScope.launch { exporter.tasks.collect { tasks -> mutableState.update { it.copy(tasks = tasks) } } }
@@ -100,7 +87,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
                 mutableState.update { it.copy(camera = value) }
                 if (previous.connected != value.connected || previous.sourceId != value.sourceId ||
                     previous.generation != value.generation || previous.catalogIds != value.catalogIds) {
-                    requestQuery()
+                    browser.refresh()
                 }
             }
         }
@@ -109,7 +96,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch { preferences.state.collect { value ->
             val previous = state.value.settings.effectiveManualVariant
             mutableState.update { it.copy(settings = value) }
-            if (previous != value.effectiveManualVariant) requestQuery()
+            if (previous != value.effectiveManualVariant) browser.refresh()
         } }
         viewModelScope.launch { camera.autoState.collect { value -> mutableState.update { it.copy(automatic = value) } } }
         viewModelScope.launch { CameraLocationService.state.collect { value -> mutableState.update { it.copy(location = value) } } }
@@ -128,7 +115,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
 
     fun importPhotos(uris: List<Uri>, permissionWarnings: List<String> = emptyList(), persistPermission: Boolean = true) {
         if (uris.isEmpty()) return
-        setLibrarySection(LibrarySection.ORIGINALS, null)
+        browser.setLibrarySection(LibrarySection.ORIGINALS, null)
         runOperation {
             val messages = permissionWarnings.toMutableList()
             var imported = 0
@@ -152,7 +139,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
                             batch.forEach { updated[it.id] = it }
                             current.copy(assets = updated.values.toList())
                         }
-                        requestQuery()
+                        browser.refresh()
                     }
                 }
                 imported += report.importedCount
@@ -166,51 +153,9 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun setFilter(filter: FilterSpec) {
-        viewerRetainedSelection = emptySet()
-        val previous = state.value.browser
-        mutableState.update { it.copy(browser = it.browser.withFilter(filter), selectedIds = emptySet()) }
-        if (previous.collection == PhotoCollection.CAMERA_IMPORT && previous.importFilter.sortOrder != filter.sortOrder) {
-            camera.setCatalogSort(filter.sortOrder)
-        }
-        requestQuery()
-    }
-
-    fun setCollection(collection: PhotoCollection) {
-        if (state.value.browser.collection == collection) return
-        changeBrowser(state.value.browser.copy(collection = collection))
-    }
-
-    fun setLibrarySection(section: LibrarySection, sourceId: String?) {
-        val current = state.value.browser
-        val parent = sourceId.takeIf { section == LibrarySection.EXPORTS }
-        val browser = current.copy(collection = PhotoCollection.LIBRARY, librarySection = section, exportSourceId = parent,
-            versionsFilter = if (parent == current.exportSourceId) current.versionsFilter else FilterSpec())
-        if (browser != current) changeBrowser(browser)
-    }
-
-    private fun changeBrowser(browser: PhotoBrowserState) {
-        viewerRetainedSelection = emptySet()
-        mutableState.update { it.copy(browser = browser, catalog = CatalogResult(emptyList(), 0, 0), selectedIds = emptySet()) }
-        if (browser.collection == PhotoCollection.CAMERA_IMPORT) camera.setCatalogSort(browser.importFilter.sortOrder)
-        requestQuery()
-    }
-
-    fun setImportVisibility(visibility: ImportVisibility) {
-        viewerRetainedSelection = emptySet()
-        mutableState.update { it.copy(browser = it.browser.copy(importVisibility = visibility), selectedIds = emptySet()) }
-        requestQuery()
-    }
-
-    fun setOfflinePreviews(visible: Boolean) {
-        viewerRetainedSelection = emptySet()
-        mutableState.update { it.copy(browser = it.browser.copy(showOfflinePreviews = visible), selectedIds = emptySet()) }
-        requestQuery()
-    }
-
     fun clearImportList() = runOperation {
         camera.clearImportList()
-        mutableState.update { it.copy(selectedIds = emptySet()) }
+        browser.clearSelection()
         reloadAssets()
     }
 
@@ -224,11 +169,11 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun removeFromImport() {
-        val ids = state.value.selectedIds.toSet()
+        val ids = state.value.selectedIds
         if (ids.isEmpty()) return
         runOperation {
             camera.clearImportList(ids)
-            mutableState.update { it.copy(selectedIds = it.selectedIds - ids) }
+            browser.deselect(ids)
             reloadAssets()
         }
     }
@@ -238,9 +183,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         val ids = assets.mapTo(hashSetOf()) { it.id }
         val uris = assets.mapTo(hashSetOf()) { it.uri }
         val exporting = current.tasks.any { it.asset.uri in uris && it.status in setOf(ExportStatus.QUEUED, ExportStatus.RUNNING) }
-        val downloading = current.camera.tasks.any {
-            it.photo.asset.id in ids && it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
-        }
+        val downloading = current.camera.tasks.any { it.pending && it.photo.asset.id in ids }
         if (exporting || downloading) { showError("所选照片还有传输或导出任务，请先完成或取消任务"); return false }
         if (assets.isEmpty() || assets.any { it.downloadState != DownloadState.DOWNLOADED }) {
             showError("只能删除已经保存在手机上的文件"); return false
@@ -250,28 +193,27 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
 
     fun completeMediaDeletion(token: String) = runOperation {
         withContext(NonCancellable) {
-            val targets = mediaDeletion.pendingTargets(token)
             // RESULT_OK from createDeleteRequest means the platform has already completed the deletion.
-            mediaDeletion.recordDeleted(token, targets)
-            repository.removeDeletedMedia(targets)
-            mediaDeletion.finish(token)
-            PhotoPreviewLoader.clearMemoryCache()
-            mutableState.update { it.copy(selectedIds = it.selectedIds - targets.map { target -> target.id }.toSet()) }
-            reloadAssets()
+            forgetDeletedMedia(token, mediaDeletion.pendingTargets(token))
         }
     }
 
     fun deleteMediaOnAndroid10(token: String) = runOperation {
         withContext(NonCancellable) {
             val result = mediaDeletion.deleteOnAndroid10(mediaDeletion.pendingTargets(token))
-            mediaDeletion.recordDeleted(token, result.deleted)
-            repository.removeDeletedMedia(result.deleted)
-            mediaDeletion.finish(token)
-            PhotoPreviewLoader.clearMemoryCache()
-            mutableState.update { it.copy(selectedIds = it.selectedIds - result.deleted.map { target -> target.id }.toSet()) }
-            reloadAssets()
+            forgetDeletedMedia(token, result.deleted)
             if (result.errors.isNotEmpty()) showError("已删除 ${result.deleted.size} 项；${result.errors.take(3).joinToString("；")}")
         }
+    }
+
+    private suspend fun forgetDeletedMedia(token: String, deleted: List<MediaDeleteTarget>) {
+        mediaDeletion.recordDeleted(token, deleted)
+        repository.removeDeletedMedia(deleted)
+        mediaDeletion.finish(token)
+        PhotoPreviewLoader.clearMemoryCache()
+        val ids = deleted.mapTo(hashSetOf()) { it.id }
+        browser.deselect(ids)
+        reloadAssets()
     }
 
     fun removeFromLibrary(all: Boolean) {
@@ -281,7 +223,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
             .filter { all || it.id in current.selectedIds }.mapTo(hashSetOf()) { it.id }
         runOperation {
             repository.setLibraryVisibility(ids, false)
-            mutableState.update { it.copy(selectedIds = it.selectedIds - ids) }
+            browser.deselect(ids)
             reloadAssets()
         }
     }
@@ -293,7 +235,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         if (selected.isEmpty()) return
         runOperation {
             repository.promoteExports(selected)
-            mutableState.update { it.copy(selectedIds = it.selectedIds - selected) }
+            browser.deselect(selected)
             reloadAssets()
         }
     }
@@ -303,38 +245,11 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         reloadAssets()
     }
 
-    fun setCollapseStacks(enabled: Boolean) {
-        mutableState.update { it.copy(collapseStacks = enabled) }
-        requestQuery()
-    }
-
-    fun toggleSelection(id: String) {
-        if (id !in state.value.selectedIds && state.value.catalog.groups.none { group -> group.members.any { it.id == id } }) return
-        viewerRetainedSelection = viewerRetainedSelection - id
-        mutableState.update { current ->
-            val selected = current.selectedIds.toMutableSet()
-            if (!selected.add(id)) selected.remove(id)
-            current.copy(selectedIds = selected)
-        }
-    }
-
-    fun selectVisible() {
-        viewerRetainedSelection = emptySet()
-        mutableState.update { current ->
-            current.copy(selectedIds = current.catalog.groups.flatMap { it.members }.mapTo(linkedSetOf()) { it.id })
-        }
-    }
-
-    fun clearSelection() {
-        viewerRetainedSelection = emptySet()
-        mutableState.update { it.copy(selectedIds = emptySet()) }
-    }
-
     fun groupSelection() = changeStack(true)
     fun ungroupSelection() = changeStack(false)
 
     private fun changeStack(group: Boolean) {
-        val ids = state.value.selectedIds.toSet()
+        val ids = state.value.selectedIds
         if (ids.isEmpty()) return
         runOperation {
             repository.setManualStack(ids, group)
@@ -349,19 +264,19 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
 
     fun setRating(rating: Int, ids: Set<String>) {
         if (rating !in 0..5) return
-        retainViewerSelection(ids)
+        browser.retainViewerSelection(ids)
         updateMarks(ids, rating = rating)
     }
 
     fun setPickState(pickState: PickState) = updateMarks(pickState = pickState)
     fun setPickState(pickState: PickState, ids: Set<String>) {
-        retainViewerSelection(ids)
+        browser.retainViewerSelection(ids)
         updateMarks(ids, pickState = pickState)
     }
     fun setTags(tags: Set<String>) = updateMarks(tags = tags.map(String::trim).filter(String::isNotEmpty).toSet())
 
     private fun updateMarks(
-        ids: Set<String> = state.value.selectedIds.toSet(), rating: Int? = null, pickState: PickState? = null, tags: Set<String>? = null
+        ids: Set<String> = state.value.selectedIds, rating: Int? = null, pickState: PickState? = null, tags: Set<String>? = null
     ) {
         if (ids.isEmpty()) return
         runOperation {
@@ -399,11 +314,11 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         try {
             options.validateLogExport(assets)
             options.look?.validateForExport(assets)
-            options.frame?.let {
-                require(options.format != org.openbridge.app.domain.ExportFormat.ORIGINAL) { "原件复制不应用边框，请选择 JPEG 或 PNG" }
-            }
+            require(options.frame == null || options.format != ExportFormat.ORIGINAL) { "原件复制不应用边框，请选择 JPEG 或 PNG" }
+        } catch (error: IllegalArgumentException) {
+            showError(error.message ?: "预设与所选照片不兼容")
+            return false
         }
-        catch (error: IllegalArgumentException) { showError(error.message ?: "预设与所选照片不兼容"); return false }
         pendingExport = PendingExport(assets, options)
         return true
     }
@@ -482,7 +397,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
             try {
                 val updated = repository.updateSourceGeometry(source) ?: return@launch
                 mutableState.update { state -> state.copy(assets = state.assets.map { it.withGeometryFrom(updated) }) }
-                requestQuery()
+                browser.refresh()
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) { Log.w("ProofTray.Preview", "Unable to save refreshed photo geometry", error) }
         }
@@ -546,7 +461,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun deleteFrameTemplate(id: String) = runOperation {
-        withContext(Dispatchers.IO) { org.openbridge.app.frame.FrameRepository(getApplication()).delete(id) }
+        withContext(Dispatchers.IO) { FrameRepository(getApplication()).delete(id) }
         mutableState.update {
             it.copy(frame = it.frame?.takeUnless { template -> template.id == id }, deletedFrameTemplateIds = it.deletedFrameTemplateIds + id)
         }
@@ -592,7 +507,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
     }
     fun downloadSelection() {
         val current = state.value
-        val visible = current.catalog.groups.flatMap { it.members }.distinctBy { it.id }.filter { it.id in current.selectedIds }
+        val visible = current.catalog.selectedPhotos(current.selectedIds)
         val selected = current.camera.catalogBatchSize?.let { visible.take(it) } ?: visible
         downloadPhotos(current, selected, clearSelection = true)
     }
@@ -601,12 +516,8 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         val current = state.value
         // A viewer rating can filter this photo out while it remains open; enqueue still checks the active camera's catalogue.
         val selected = current.assets.firstOrNull { it.id == id }
-        retainViewerSelection(setOf(id))
+        browser.retainViewerSelection(setOf(id))
         downloadPhotos(current, listOfNotNull(selected), clearSelection = false)
-    }
-
-    private fun retainViewerSelection(ids: Set<String>) {
-        viewerRetainedSelection = viewerRetainedSelection + ids.intersect(state.value.selectedIds)
     }
 
     private fun downloadPhotos(current: LibraryUiState, selected: List<PhotoAsset>, clearSelection: Boolean) {
@@ -621,7 +532,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
             }
             repository.setLibraryVisibility(local, true)
             val submitted = local + remote
-            if (clearSelection) mutableState.update { it.copy(selectedIds = it.selectedIds - submitted) }
+            if (clearSelection) browser.deselect(submitted)
             reloadAssets()
         }
     }
@@ -639,19 +550,12 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         val assets = repository.loadAssets()
         val historyCount = repository.importHistoryCount()
         mutableState.update { it.copy(assets = assets, importHistoryCount = historyCount) }
-        requestQuery()
+        browser.refresh()
     }
 
     private suspend fun reloadSavedFilters() {
         val filters = repository.loadSavedFilters()
         mutableState.update { it.copy(savedFilters = filters) }
-    }
-
-    private fun requestQuery() {
-        val current = state.value
-        val source = current.camera.sourceId.takeIf { current.camera.connected }
-        val members = collectionAssets(current.assets, current.browser, source, current.camera.catalogIds, current.settings.effectiveManualVariant)
-        catalogQuery.submit(members, current.browser.filter, current.collapseStacks)
     }
 
     private fun updateLoading() = mutableState.update { it.copy(isLoading = operationCount > 0 || queryRunning) }

@@ -58,6 +58,8 @@ import org.openbridge.app.domain.PhotoAsset
 import org.openbridge.app.domain.hasConditions
 import org.openbridge.app.domain.ColorLookSettings
 import org.openbridge.app.domain.MediaFormat
+import org.openbridge.app.domain.selectedPhotos
+import org.openbridge.app.domain.visiblePhotoIds
 
 private fun PhotoAsset.deletable(): Boolean = downloadState == DownloadState.DOWNLOADED && uri.startsWith("content:")
 
@@ -149,10 +151,8 @@ private fun LibraryContent(state: LibraryUiState, actions: LibraryActions, showA
     }
 
     val tiles = remember(state.catalog) { state.catalog.groups.map { it.members.first() } }
-    val visibleIds = remember(state.catalog) { state.catalog.groups.flatMap { it.members }.map { it.id }.toSet() }
-    val visibleSelected = remember(state.catalog, state.selectedIds) {
-        state.catalog.groups.flatMap { it.members }.distinctBy { it.id }.filter { it.id in state.selectedIds }
-    }
+    val visibleIds = remember(state.catalog) { state.catalog.visiblePhotoIds() }
+    val visibleSelected = remember(state.catalog, state.selectedIds) { state.catalog.selectedPhotos(state.selectedIds) }
     val hiddenCount = selected.count { it.id !in visibleIds }
     val canDelete = selected.isNotEmpty() && selected.all { it.deletable() }
     val compareAssets = remember(comparing, state.assets) { comparing.mapNotNull { id -> state.assets.find { it.id == id } } }
