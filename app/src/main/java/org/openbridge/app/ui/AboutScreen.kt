@@ -171,8 +171,9 @@ private fun LicenseEntry(name: String, license: String, licenseUrl: String, noti
 @Composable
 private fun QuickStartSheet(onDismiss: () -> Unit) {
     BridgeSheet("快速上手", onDismiss, actions = { TextButton(onClick = onDismiss) { Text("知道了") } }, compact = true) {
-        AboutDetail(BridgeGlyph.CAMERA, "连接", "在“相机”页配对并连接相机。")
-        AboutDetail(BridgeGlyph.FILTER, "导入", "长按照片开始多选，再导入所选照片。")
+        AboutDetail(BridgeGlyph.CAMERA, "连接", "在“导入”页添加相机；首次连接需在机身上核对配对码。")
+        AboutDetail(BridgeGlyph.DOWNLOAD, "导入", "点“选择”或长按照片开始多选，再导入所选原片；在大图中可直接评分和标记入选。")
         AboutDetail(BridgeGlyph.PHOTOS, "图库", "整理、比较、调色与导出。")
+        AboutDetail(BridgeGlyph.TASKS, "任务", "导入与导出在后台排队，可在“任务”页暂停、取消或重试。")
     }
 }

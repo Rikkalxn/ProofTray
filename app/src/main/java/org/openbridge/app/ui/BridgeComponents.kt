@@ -47,8 +47,8 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 enum class BridgeGlyph {
-    PHOTOS, CAMERA, TASKS, ADD, FILTER, MORE, CLOSE, CHECK, REFRESH, STAR, BLUETOOTH, WIFI, DOWNLOAD, SHARE, BACK, FORWARD,
-    SETTINGS, LOCATION, INFO, FRAME, LAYERS, EDIT, COPY, DELETE, UNDO, REDO, LOCK, VISIBLE, HIDDEN
+    PHOTOS, CAMERA, TASKS, ADD, FILTER, MORE, CLOSE, CHECK, REFRESH, STAR, STAR_FILLED, BLUETOOTH, WIFI, DOWNLOAD, SHARE, BACK, FORWARD,
+    SETTINGS, LOCATION, INFO, FRAME, LAYERS, EDIT, COPY, DELETE, UNDO, REDO, LOCK, VISIBLE, HIDDEN, BATTERY
 }
 
 @Composable
@@ -101,7 +101,7 @@ fun BridgeIcon(glyph: BridgeGlyph, description: String? = null, modifier: Modifi
                     }
                     drawPath(arrow, tint, style = stroke)
                 }
-                BridgeGlyph.STAR -> {
+                BridgeGlyph.STAR, BridgeGlyph.STAR_FILLED -> {
                     val star = Path()
                     for (point in 0 until 10) {
                         val angle = Math.PI * point / 5 - Math.PI / 2
@@ -109,7 +109,9 @@ fun BridgeIcon(glyph: BridgeGlyph, description: String? = null, modifier: Modifi
                         val x = 12f + radius * cos(angle).toFloat(); val y = 12f + radius * sin(angle).toFloat()
                         if (point == 0) star.moveTo(x, y) else star.lineTo(x, y)
                     }
-                    star.close(); drawPath(star, tint, style = stroke)
+                    star.close()
+                    if (glyph == BridgeGlyph.STAR_FILLED) drawPath(star, tint)
+                    drawPath(star, tint, style = stroke)
                 }
                 BridgeGlyph.BLUETOOTH -> path(6f, 6f, 17f, 17f, 12f, 22f, 12f, 2f, 17f, 7f, 6f, 18f)
                 BridgeGlyph.WIFI -> {
@@ -175,6 +177,11 @@ fun BridgeIcon(glyph: BridgeGlyph, description: String? = null, modifier: Modifi
                     }
                     drawPath(shape, tint, style = stroke); drawCircle(tint, 3f, Offset(12f, 12f), style = stroke)
                     if (glyph == BridgeGlyph.HIDDEN) line(3f, 3f, 21f, 21f)
+                }
+                BridgeGlyph.BATTERY -> {
+                    drawRoundRect(tint, Offset(2f, 7f), Size(17f, 10f), CornerRadius(2f), style = stroke)
+                    line(21.5f, 10.5f, 21.5f, 13.5f)
+                    drawRect(tint, Offset(4.5f, 9.5f), Size(8f, 5f))
                 }
             }
         }

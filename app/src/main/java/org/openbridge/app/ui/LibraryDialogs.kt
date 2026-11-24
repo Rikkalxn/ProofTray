@@ -50,7 +50,7 @@ internal fun SavedFiltersDialog(state: LibraryUiState, actions: LibraryActions, 
     AlertDialog(
         onDismissRequest = onDismiss, title = { Text("已保存的筛选") },
         text = {
-            if (state.savedFilters.isEmpty()) Text("在『⋮ → 保存当前筛选』里保存")
+            if (state.savedFilters.isEmpty()) Text("设置筛选条件后，在“更多 → 保存当前筛选”中保存，之后可在这里一键套用。")
             else LazyColumn(modifier = Modifier.height(360.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 items(state.savedFilters, key = { it.id }) { saved ->
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {

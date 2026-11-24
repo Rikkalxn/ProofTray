@@ -25,6 +25,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -135,10 +136,7 @@ fun PhotoViewer(
                     }
                 }
                 if (current != null) {
-                    Text(detailOf(current), Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
-                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    ViewerActions(current, selectedIds.size, importing, canImport(current), canEdit(current), onRate, onPick,
+                    ViewerActions(current, detailOf(current), selectedIds.size, importing, canImport(current), canEdit(current), onRate, onPick,
                         onExport, onImport, onCamera, onEdit, onFrame, onCompare, versionCount(current), onShowVersions, onPromote)
                 }
             }
@@ -146,42 +144,28 @@ fun PhotoViewer(
     }
 }
 
-/** Rating, pick state and the primary action stay visible; everything else fits behind one menu on narrow phones. */
+/** Rating and pick state take one tap each while culling; the primary action stays visible and the rest sits behind one menu. */
 @Composable
 private fun ViewerActions(
-    photo: PhotoAsset, selectedCount: Int, importing: Boolean, canImport: Boolean, canEdit: Boolean,
+    photo: PhotoAsset, detail: String, selectedCount: Int, importing: Boolean, canImport: Boolean, canEdit: Boolean,
     onRate: (PhotoAsset, Int) -> Unit, onPick: (PhotoAsset, PickState) -> Unit,
     onExport: (PhotoAsset) -> Unit, onImport: (PhotoAsset) -> Unit, onCamera: () -> Unit,
     onEdit: (PhotoAsset) -> Unit, onFrame: (PhotoAsset) -> Unit, onCompare: (() -> Unit)?,
     versions: Int, onShowVersions: (PhotoAsset) -> Unit, onPromote: ((PhotoAsset) -> Unit)?
 ) {
-    var ratingMenu by remember(photo.id) { mutableStateOf(false) }
-    var pickMenu by remember(photo.id) { mutableStateOf(false) }
     var more by remember(photo.id) { mutableStateOf(false) }
     val canCompare = onCompare != null && selectedCount in 2..4
     val canPromote = onPromote != null && photo.derivedFromId != null
-    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box {
-            TextButton(onClick = { ratingMenu = true }) {
-                BridgeIcon(BridgeGlyph.STAR, "评分")
-                Text(photo.rating.toString())
-            }
-            DropdownMenu(expanded = ratingMenu, onDismissRequest = { ratingMenu = false }) {
-                (5 downTo 0).forEach { rating ->
-                    DropdownMenuItem(text = { Text(if (rating == 0) "清除评分" else "★".repeat(rating)) },
-                        onClick = { ratingMenu = false; onRate(photo, rating) })
-                }
-            }
-        }
-        Box {
-            TextButton(onClick = { pickMenu = true }) {
-                Text(when (photo.pickState) { PickState.PICKED -> "已入选"; PickState.REJECTED -> "已排除"; PickState.UNMARKED -> "标记" })
-            }
-            DropdownMenu(expanded = pickMenu, onDismissRequest = { pickMenu = false }) {
-                listOf(PickState.PICKED to "入选", PickState.REJECTED to "排除", PickState.UNMARKED to "清除标记").forEach { (pick, label) ->
-                    DropdownMenuItem(text = { Text(label) }, onClick = { pickMenu = false; onPick(photo, pick) })
-                }
-            }
+    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(detail, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
+        RatingStars(photo.rating) { onRate(photo, it) }
+    }
+    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf(PickState.PICKED to "入选", PickState.REJECTED to "排除").forEach { (pick, label) ->
+            FilterChip(selected = photo.pickState == pick, label = { Text(label) },
+                onClick = { onPick(photo, if (photo.pickState == pick) PickState.UNMARKED else pick) })
         }
         Spacer(Modifier.weight(1f))
         FilledTonalButton(onClick = {
@@ -199,6 +183,21 @@ private fun ViewerActions(
                 if (versions > 0) DropdownMenuItem(text = { Text("$versions 个导出版本") },
                     onClick = { more = false; onShowVersions(photo) })
                 if (canPromote) DropdownMenuItem(text = { Text("放入照片") }, onClick = { more = false; onPromote?.invoke(photo) })
+            }
+        }
+    }
+}
+
+/** Tapping the current rating clears it, so 0–5 stars stay one tap away without a menu. */
+@Composable
+private fun RatingStars(rating: Int, onRate: (Int) -> Unit) {
+    Row {
+        (1..5).forEach { value ->
+            val filled = value <= rating
+            IconButton(onClick = { onRate(if (value == rating) 0 else value) }) {
+                BridgeIcon(if (filled) BridgeGlyph.STAR_FILLED else BridgeGlyph.STAR,
+                    if (value == rating) "已评 $value 星，清除评分" else "评为 $value 星",
+                    tint = if (filled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }

@@ -350,7 +350,16 @@ internal fun PhotoCard(
         .semantics { if (selecting) this.selected = selected }
         .combinedClickable(onClick = if (selecting) onToggle else onOpen, onLongClickLabel = "选择照片", onLongClick = onToggle)) {
         PhotoImage(asset, Modifier.fillMaxSize().padding(inset).clip(shape).alpha(if (asset.pickState == PickState.REJECTED) 0.45f else 1f))
-        badge?.let { TileLabel(it, Modifier.align(Alignment.TopStart).padding(inset + 6.dp)) }
+        val picked = asset.pickState == PickState.PICKED
+        val mark = when (asset.pickState) { PickState.PICKED -> "入选"; PickState.REJECTED -> "排除"; PickState.UNMARKED -> null }
+        if (badge != null || mark != null) Column(Modifier.align(Alignment.TopStart).padding(inset + 6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            badge?.let { TileLabel(it) }
+            mark?.let {
+                if (picked) TileLabel(it, container = MaterialTheme.colorScheme.primary, content = MaterialTheme.colorScheme.onPrimary)
+                else TileLabel(it)
+            }
+        }
         if (selecting || selected || showSelection) Box(Modifier.align(Alignment.TopEnd).size(48.dp)
             .clickable(onClickLabel = if (selected) "取消选择" else "选择照片", onClick = onToggle), contentAlignment = Alignment.TopEnd) {
             SelectionMark(selected, Modifier.padding(6.dp))
@@ -367,9 +376,11 @@ internal fun PhotoCard(
 }
 
 @Composable
-internal fun TileLabel(text: String, modifier: Modifier = Modifier) {
-    Text(text, modifier.background(Color.Black.copy(alpha = 0.55f), MaterialTheme.shapes.extraSmall).padding(horizontal = 6.dp, vertical = 2.dp),
-        color = Color.White, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+internal fun TileLabel(
+    text: String, modifier: Modifier = Modifier, container: Color = Color.Black.copy(alpha = 0.55f), content: Color = Color.White
+) {
+    Text(text, modifier.background(container, MaterialTheme.shapes.extraSmall).padding(horizontal = 6.dp, vertical = 2.dp),
+        color = content, style = MaterialTheme.typography.labelSmall, maxLines = 1)
 }
 
 @Composable

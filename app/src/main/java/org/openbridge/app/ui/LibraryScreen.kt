@@ -22,17 +22,20 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
@@ -60,16 +63,23 @@ private fun PhotoAsset.deletable(): Boolean = downloadState == DownloadState.DOW
 
 @Composable
 fun LibraryScreen(state: LibraryUiState, actions: LibraryActions, showAboutOnStart: Boolean = false) {
+    // Only tasks the user just asked for are announced; restored journals and automatic downloads stay silent.
+    val requested = remember { mutableStateOf(false) }
+    val tracked = actions.copy(
+        onExportPhotos = { ids, options -> requested.value = true; actions.onExportPhotos(ids, options) },
+        onDownloadSelection = { requested.value = true; actions.onDownloadSelection() },
+        onDownloadPhoto = { id -> requested.value = true; actions.onDownloadPhoto(id) })
     CompositionLocalProvider(LocalCameraPreviewRequest provides actions.onRequestPreview,
         LocalCameraSessionGeneration provides state.camera.generation, LocalPhotoGeometryUpdate provides actions.onPreviewGeometry) {
-        OpenBridgeTheme { LibraryContent(state, actions, showAboutOnStart) }
+        OpenBridgeTheme { LibraryContent(state, tracked, showAboutOnStart, requested) }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun LibraryContent(state: LibraryUiState, actions: LibraryActions, showAboutOnStart: Boolean) {
+private fun LibraryContent(state: LibraryUiState, actions: LibraryActions, showAboutOnStart: Boolean, requested: MutableState<Boolean>) {
     var tab by rememberSaveable(stateSaver = MainTabSaver) { mutableStateOf(MainTab.LIBRARY) }
+    var taskExports by rememberSaveable { mutableStateOf(false) }
     var showingAbout by rememberSaveable { mutableStateOf(showAboutOnStart) }
     var showingFilters by remember { mutableStateOf(false) }
     var showingSaveFilter by remember { mutableStateOf(false) }
@@ -151,17 +161,23 @@ private fun LibraryContent(state: LibraryUiState, actions: LibraryActions, showA
     val hasPhotos = state.catalog.groups.isNotEmpty()
     val pendingTasks = state.tasks.count { it.status == ExportStatus.QUEUED || it.status == ExportStatus.RUNNING } +
         state.camera.tasks.count { it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING }
+    val failedTasks = state.tasks.count { it.status == ExportStatus.FAILED } + state.camera.tasks.count { it.status == DownloadStatus.WAITING }
     if (showingAbout) {
         AboutScreen(onBack = { showingAbout = false; navigate(MainTab.SETTINGS) })
     }
     val selecting = page.collection != null && (selected.isNotEmpty() || selectMode)
     val exitSelection = { selectMode = false; actions.onClearSelection() }
+    BackHandler(enabled = page != MainTab.LIBRARY && !selecting && !showingAbout && !showingCamera) { navigate(MainTab.LIBRARY) }
     BackHandler(enabled = exportSource != null && !selecting && previewId == null && editing == null) {
         val source = state.assets.find { it.id == exportSource && !it.hiddenFromLibrary && it.downloadState == DownloadState.DOWNLOADED }
         browseLibrary(if (source != null) LibrarySection.ORIGINALS else LibrarySection.EXPORTS)
         previewId = source?.id
     }
     BackHandler(enabled = selecting && !showingAbout && !showingCamera, onBack = exitSelection)
+    QueuedTaskNotice(state, requested, snackbar, announce = page != MainTab.TASKS) { exports ->
+        taskExports = exports
+        navigate(MainTab.TASKS)
+    }
     if (!showingAbout) Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbar) },
@@ -176,8 +192,8 @@ private fun LibraryContent(state: LibraryUiState, actions: LibraryActions, showA
                                 Text(if (selected.isEmpty()) "选择照片" else "已选 ${selected.size} 张", fontWeight = FontWeight.SemiBold)
                                 if (hiddenCount > 0) Text("含筛选外 $hiddenCount 张", style = MaterialTheme.typography.labelSmall)
                             }
-                            importing -> Text("$count 张照片", style = MaterialTheme.typography.titleMedium)
-                            !importing && (hasPhotos || filtering) -> Text("$count 张照片", style = MaterialTheme.typography.titleMedium)
+                            hasPhotos || filtering -> Text("$count 张照片", style = MaterialTheme.typography.titleMedium)
+                            else -> Text(page.title, style = MaterialTheme.typography.titleMedium)
                         }
                     }
                 },
@@ -231,7 +247,8 @@ private fun LibraryContent(state: LibraryUiState, actions: LibraryActions, showA
                         }
                     }
                 }
-            )
+            ) else TopAppBar(title = { Text(page.title, style = MaterialTheme.typography.titleMedium) },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background))
         },
         bottomBar = {
             if (selecting) {
@@ -250,8 +267,10 @@ private fun LibraryContent(state: LibraryUiState, actions: LibraryActions, showA
                 MainTab.entries.forEach { destination ->
                     NavigationBarItem(selected = page == destination, onClick = { navigate(destination) },
                         label = { Text(destination.title) }, icon = {
-                        BadgedBox(badge = { if (destination == MainTab.TASKS && pendingTasks > 0) Badge { Text(pendingTasks.toString()) } }) {
-                            BridgeIcon(destination.glyph)
+                        val tasks = destination == MainTab.TASKS
+                        val retry = tasks && pendingTasks == 0 && failedTasks > 0
+                        BadgedBox(badge = { if (tasks && pendingTasks > 0) Badge { Text(pendingTasks.toString()) } else if (retry) Badge() }) {
+                            BridgeIcon(destination.glyph, if (retry) "$failedTasks 个任务需重试" else null)
                         }
                     })
                 }
@@ -266,7 +285,7 @@ private fun LibraryContent(state: LibraryUiState, actions: LibraryActions, showA
                         onLibrarySection = { browseLibrary(it) },
                         onCamera = ::openCamera, onRegister = { registering = true }, onFilters = { showingFilters = true },
                         onExpand = { expandedGroupId = it }, onPreview = { previewId = it })
-                    MainTab.TASKS -> TransferScreen(state.transferState(), actions.transferActions())
+                    MainTab.TASKS -> TransferScreen(state.transferState(), actions.transferActions(), taskExports) { taskExports = it }
                     MainTab.SETTINGS -> SettingsScreen(state, actions, onCamera = { openCamera() },
                         onAbout = { showingAbout = true }, onManage = { showingColorLibrary = true })
                 }
@@ -335,4 +354,37 @@ private fun LibraryContent(state: LibraryUiState, actions: LibraryActions, showA
         onDismiss = { showingCamera = false; actions.onStopBleScan() })
     CameraRegistrationDialogs(state, actions, registering) { registering = false }
 
+}
+
+/** Confirms tasks queued after a user request; [onOpen] receives whether the export list should be shown. */
+@Composable
+private fun QueuedTaskNotice(
+    state: LibraryUiState, requested: MutableState<Boolean>, snackbar: SnackbarHostState, announce: Boolean, onOpen: (Boolean) -> Unit
+) {
+    val exports = remember(state.tasks) {
+        state.tasks.filter { it.status == ExportStatus.QUEUED || it.status == ExportStatus.RUNNING }.mapTo(hashSetOf()) { it.id }
+    }
+    val imports = remember(state.camera.tasks) {
+        state.camera.tasks.filter { !it.automatic && (it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING) }
+            .mapTo(hashSetOf()) { it.id }
+    }
+    var seen by remember { mutableStateOf(exports + imports) }
+    val visible by rememberUpdatedState(announce)
+    val open by rememberUpdatedState(onOpen)
+    // Shown outside the effect: a quick task finishing must not cancel its own confirmation.
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(exports, imports) {
+        val addedImports = (imports - seen).size
+        val addedExports = (exports - seen).size
+        seen = seen + exports + imports
+        if (addedImports + addedExports == 0 || !requested.value) return@LaunchedEffect
+        requested.value = false
+        if (!visible) return@LaunchedEffect
+        val added = listOfNotNull("导入 $addedImports 张".takeIf { addedImports > 0 }, "导出 $addedExports 张".takeIf { addedExports > 0 })
+        scope.launch {
+            if (snackbar.showSnackbar("已加入任务：${added.joinToString("，")}", "查看") == SnackbarResult.ActionPerformed) {
+                open(addedImports == 0)
+            }
+        }
+    }
 }

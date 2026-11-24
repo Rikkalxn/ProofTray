@@ -68,8 +68,8 @@ private fun ExportStatus.taskView(): TaskView = when (this) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun TransferScreen(state: TransferScreenState, actions: TransferScreenActions) {
-    var source by rememberSaveable { mutableStateOf(0) }
+internal fun TransferScreen(state: TransferScreenState, actions: TransferScreenActions, showExports: Boolean, onShowExports: (Boolean) -> Unit) {
+    val source = if (showExports) 1 else 0
     var view by rememberSaveable(source) { mutableStateOf(TaskView.ALL) }
     var filterMenu by remember(source) { mutableStateOf(false) }
     var clearing by remember { mutableStateOf(false) }
@@ -89,11 +89,14 @@ internal fun TransferScreen(state: TransferScreenState, actions: TransferScreenA
         state.exports.asReversed().let { if (view == TaskView.ALL) it else it.filter { task -> task.status.taskView() == view } }
     }
     val visibleCount = if (downloads) downloadRows.size else exportRows.size
+    val activeCounts = listOf(state.downloads.count { it.status.taskView() == TaskView.ACTIVE },
+        state.exports.count { it.status.taskView() == TaskView.ACTIVE })
     Column(Modifier.fillMaxSize()) {
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
             listOf("相机导入", "照片导出").forEachIndexed { index, label ->
-                SegmentedButton(selected = source == index, onClick = { source = index }, shape = SegmentedButtonDefaults.itemShape(index, 2)) {
-                    Text(label)
+                SegmentedButton(selected = source == index, onClick = { onShowExports(index == 1) },
+                    shape = SegmentedButtonDefaults.itemShape(index, 2)) {
+                    Text(if (activeCounts[index] > 0) "$label · ${activeCounts[index]}" else label, maxLines = 1)
                 }
             }
         }
@@ -127,8 +130,14 @@ internal fun TransferScreen(state: TransferScreenState, actions: TransferScreenA
             }) { Text("全部重试") }
         }
         if (visibleCount == 0) Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-            Text(if (count == 0) "暂无任务记录" else "此筛选下没有任务", style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                BridgeIcon(if (downloads) BridgeGlyph.DOWNLOAD else BridgeGlyph.SHARE, modifier = Modifier.size(48.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(if (count == 0) "暂无任务记录" else "此筛选下没有任务", style = MaterialTheme.typography.titleMedium)
+                if (count == 0) Text(if (downloads) "在“导入”页选择相机照片后导入" else "在“图库”选择照片后导出",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                else TextButton(onClick = { view = TaskView.ALL }) { Text("显示全部任务") }
+            }
         } else LazyColumn(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)) {
             if (downloads) items(downloadRows, key = { it.id }) { task ->
                 val sourceAsset = assetsById[task.photo.asset.id] ?: task.photo.asset

@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -30,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import org.openbridge.app.R
 import org.openbridge.app.camera.BleCamera
@@ -41,8 +43,9 @@ import org.openbridge.app.domain.PowerProfile
 import org.openbridge.app.domain.AutoDownloadKind
 import org.openbridge.app.domain.DownloadVariant
 
-private enum class SettingsSection(val title: String) {
-    DEVICES("相机设备"), AUTO("自动导入"), IMPORT("导入"), LOCATION("位置同步"), POWER("功耗与响应")
+private enum class SettingsSection(val title: String, val glyph: BridgeGlyph) {
+    DEVICES("相机设备", BridgeGlyph.CAMERA), AUTO("自动导入", BridgeGlyph.REFRESH), IMPORT("导入", BridgeGlyph.DOWNLOAD),
+    LOCATION("位置同步", BridgeGlyph.LOCATION), POWER("功耗与响应", BridgeGlyph.BATTERY)
 }
 
 @Composable
@@ -50,21 +53,26 @@ fun SettingsScreen(state: LibraryUiState, actions: LibraryActions, onCamera: () 
     var section by rememberSaveable { mutableStateOf<SettingsSection?>(null) }
     val settings = state.settings
     val autoKind = if (settings.sonySelected && settings.autoKind == AutoDownloadKind.CAMERA_JPEG) AutoDownloadKind.JPEG else settings.autoKind
-    LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+    val connection = cameraConnectionSummary(state).title
+    LazyColumn(contentPadding = PaddingValues(bottom = 8.dp)) {
+        item(key = "camera-header") { SettingsHeader("相机与导入") }
         SettingsSection.entries.forEach { option ->
             item(key = option.name) {
                 val value = when (option) {
-                    SettingsSection.DEVICES -> settings.selectedName.ifBlank { "未添加" }
+                    SettingsSection.DEVICES -> settings.selectedName.takeIf { it.isNotBlank() }?.let { "$it · $connection" } ?: "未添加"
                     SettingsSection.AUTO -> if (settings.automaticEnabled) autoKind.label() else "关闭"
                     SettingsSection.IMPORT -> settings.effectiveManualVariant.label()
                     SettingsSection.LOCATION -> if (settings.locationSync) "开启" else "关闭"
                     SettingsSection.POWER -> settings.powerProfile.label()
                 }
-                SettingsRow(option.title, value) { section = option }
+                SettingsRow(option.title, option.glyph, value) { section = option }
             }
         }
-        item { SettingsRow("调色与边框", "${state.luts.size + state.removedLuts.size} 个 LUT · ${state.colorPresets.size} 个预设", onManage) }
-        item { SettingsRow("关于 ${stringResource(R.string.app_name)}", onClick = onAbout) }
+        item(key = "general-header") { SettingsHeader("通用") }
+        item(key = "color") {
+            SettingsRow("调色与边框", BridgeGlyph.FRAME, "${state.luts.size + state.removedLuts.size} 个 LUT · ${state.colorPresets.size} 个预设", onManage)
+        }
+        item(key = "about") { SettingsRow("关于 ${stringResource(R.string.app_name)}", BridgeGlyph.INFO, onClick = onAbout) }
     }
     section?.let { selected ->
         val dismiss = { section = null }
@@ -148,13 +156,17 @@ private fun ImportHistoryControl(state: LibraryUiState, onClear: () -> Unit) {
 }
 
 @Composable
-private fun SettingsRow(title: String, value: String? = null, onClick: () -> Unit) {
-    ListItem(modifier = Modifier.clickable(onClick = onClick), headlineContent = { Text(title) }, trailingContent = {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (value != null) Text(value, style = MaterialTheme.typography.bodySmall)
-            BridgeIcon(BridgeGlyph.FORWARD)
-        }
-    })
+private fun SettingsHeader(title: String) {
+    Text(title, Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp), style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.primary)
+}
+
+@Composable
+private fun SettingsRow(title: String, glyph: BridgeGlyph, value: String? = null, onClick: () -> Unit) {
+    ListItem(modifier = Modifier.clickable(onClick = onClick), headlineContent = { Text(title) },
+        supportingContent = value?.let { { Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis) } },
+        leadingContent = { BridgeIcon(glyph, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+        trailingContent = { BridgeIcon(BridgeGlyph.FORWARD, tint = MaterialTheme.colorScheme.onSurfaceVariant) })
 }
 
 @Composable
