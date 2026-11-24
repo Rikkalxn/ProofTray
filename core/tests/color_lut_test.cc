@@ -287,6 +287,28 @@ void SceneLutDomain() {
   Reject([&] { openbridge::ValidateLook(look); });  // Never accept scene encoding on the 8-bit RGB path.
 }
 
+void DirectLogExport() {
+  using E = openbridge::LutEncoding;
+  using R = openbridge::LogRange;
+  openbridge::ColorLook look;
+  look.input_encoding = E::SLog3Cine;
+  look.output_encoding = E::Direct;
+  look.strength = 0.f;
+  look.contrast = 1.f;
+  look.saturation = 0.f;
+  const openbridge::Rgb raw_gray{.081f, .081f, .081f};
+  const auto grade = openbridge::PrepareRawLogGrade(R::Video10, 0.f, look);
+  const float gray = 420.f / 1023.f;
+  Near(openbridge::EncodeLogPixel(raw_gray, grade), {gray, gray, gray});
+  // Export is full-range even when the last LUT used video-range coordinates or zero strength.
+  const float video = (420.f - 64.f) / 876.f;
+  Near(openbridge::EncodeLogPixel(raw_gray, grade, R::Video10), {video, video, video});
+  look.exposure_ev = 1.f;
+  const auto brighter_grade = openbridge::PrepareRawLogGrade(R::Full10, 1.f, look);
+  const float brighter = static_cast<float>((420. + 261.5 * std::log10((.72 + .01) / .19)) / 1023.);
+  Near(openbridge::EncodeLogPixel(raw_gray, brighter_grade), {brighter, brighter, brighter});
+}
+
 
 }  // namespace
 
@@ -299,6 +321,7 @@ int main() {
     SceneEncodings();
     RawExposureReference();
     SceneLutDomain();
+    DirectLogExport();
     Check(std::abs(openbridge::NLogCode(.18) - 372.032) < .001, "N-Log metered gray changed");
     Check(openbridge::NLogCode(1) == 619 && openbridge::NLogCode(4) > 826, "Reference white or highlight headroom lost");
     Near(openbridge::GetLogEncoding(openbridge::LutEncoding::NLog).ToGamut({1, 1, 1}), {1, 1, 1});

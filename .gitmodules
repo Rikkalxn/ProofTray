@@ -1,3 +1,6 @@
 [submodule "libraw"]
 	path = third_party/libraw/upstream
 	url = https://github.com/LibRaw/LibRaw.git
+[submodule "libtiff"]
+	path = third_party/libtiff/upstream
+	url = https://gitlab.com/libtiff/libtiff.git

@@ -34,6 +34,7 @@ import org.openbridge.app.domain.ExportOptions
 import org.openbridge.app.domain.ExportStatus
 import org.openbridge.app.domain.ExportTask
 import org.openbridge.app.domain.PhotoAsset
+import org.openbridge.app.domain.validateLogExport
 import org.openbridge.app.frame.FrameMetadataReader
 import org.openbridge.app.frame.FrameRepository
 import org.openbridge.app.frame.prepareFrameExport
@@ -106,6 +107,7 @@ class BatchExportManager(context: Context) {
 
     suspend fun enqueue(assets: List<PhotoAsset>, options: ExportOptions, destinationUri: String): Unit = withContext(Dispatchers.IO) {
         require(options.jpegQuality in 1..100 && options.maxEdge >= 0) { "导出参数无效" }
+        options.validateLogExport(assets)
         options.look?.validateForExport(assets)
         require(options.format != ExportFormat.ORIGINAL || options.look == null || options.look.isIdentity) { "原格式复制不应用调色，请选择 JPEG 或 PNG" }
         if (options.destination == ExportDestination.DIRECTORY) {
@@ -220,6 +222,8 @@ class BatchExportManager(context: Context) {
             val message = if (task.options.format == ExportFormat.ORIGINAL) {
                 writer.copyOriginal(task, destination, work)
                 "原始文件已复制，未重新编码"
+            } else if (task.options.log != null) {
+                writer.convertLog(task, destination, work)
             } else {
                 writer.convertRaster(task, destination, work)
             }

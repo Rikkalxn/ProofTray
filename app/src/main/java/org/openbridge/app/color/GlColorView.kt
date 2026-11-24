@@ -7,6 +7,7 @@ import android.opengl.GLSurfaceView
 import android.opengl.GLUtils
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicReference
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
@@ -47,7 +48,8 @@ class GlColorView(context: Context, onError: (String) -> Unit) : GLSurfaceView(c
         private var width = 1
         private var height = 1
         private var image: Bitmap? = null
-        fun clearImageReference() { image = null }
+        private var lutBuffer: FloatBuffer? = null
+        fun clearImageReference() { image = null; lutBuffer = null }
         private var lutId: String? = null
         private val textures = IntArray(2)
         private val vertexArray = IntArray(1)
@@ -121,13 +123,15 @@ class GlColorView(context: Context, onError: (String) -> Unit) : GLSurfaceView(c
                 GLES30.glUniform1i(location("premultiplied"), if (frame.bitmap.isPremultiplied) 1 else 0)
                 GLES30.glUniform3fv(location("domainMin"), 1, lut?.domainMin ?: floatArrayOf(0f, 0f, 0f), 0)
                 GLES30.glUniform3fv(location("domainMax"), 1, lut?.domainMax ?: floatArrayOf(1f, 1f, 1f), 0)
-                GLES30.glUniform1f(location("strength"), frame.look.strength)
-                GLES30.glUniform1i(location("inputEncoding"), checkNotNull(frame.look.usage.input).nativeCode)
-                GLES30.glUniform1i(location("outputEncoding"), checkNotNull(frame.look.usage.output).nativeCode)
-                GLES30.glUniform1f(location("exposure"), frame.look.exposure)
-                GLES30.glUniform1f(location("contrast"), frame.look.contrast)
-                GLES30.glUniform1f(location("saturation"), frame.look.saturation)
-                GLES30.glUniform1f(location("warmth"), frame.look.warmth)
+                // Version 2 arrives as the complete C++ display table. Only legacy recipes use the old shader operators.
+                val shaderLook = if (frame.look.renderVersion == 2) ColorLookSettings() else frame.look
+                GLES30.glUniform1f(location("strength"), shaderLook.strength)
+                GLES30.glUniform1i(location("inputEncoding"), checkNotNull(shaderLook.usage.input).nativeCode)
+                GLES30.glUniform1i(location("outputEncoding"), checkNotNull(shaderLook.usage.output).nativeCode)
+                GLES30.glUniform1f(location("exposure"), shaderLook.exposure)
+                GLES30.glUniform1f(location("contrast"), shaderLook.contrast)
+                GLES30.glUniform1f(location("saturation"), shaderLook.saturation)
+                GLES30.glUniform1f(location("warmth"), shaderLook.warmth)
                 val aspect = frame.bitmap.width.toFloat() / frame.bitmap.height
                 val viewport = width.toFloat() / height
                 val x = minOf(1f, aspect / viewport)
@@ -152,8 +156,11 @@ class GlColorView(context: Context, onError: (String) -> Unit) : GLSurfaceView(c
             if (target == GLES30.GL_TEXTURE_3D) GLES30.glTexParameteri(target, GLES30.GL_TEXTURE_WRAP_R, GLES30.GL_CLAMP_TO_EDGE)
         }
         private fun uploadLut(size: Int, values: FloatArray) {
-            val buffer = ByteBuffer.allocateDirect(values.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().put(values)
-            buffer.position(0)
+            val buffer = lutBuffer?.takeIf { it.capacity() >= values.size } ?: ByteBuffer.allocateDirect(values.size * 4)
+                .order(ByteOrder.nativeOrder()).asFloatBuffer().also { lutBuffer = it }
+            buffer.clear()
+            buffer.put(values)
+            buffer.flip()
             GLES30.glTexImage3D(GLES30.GL_TEXTURE_3D, 0, GLES30.GL_RGB32F, size, size, size, 0, GLES30.GL_RGB, GLES30.GL_FLOAT, buffer)
         }
         private fun shader(type: Int, source: String): Int {

@@ -19,7 +19,7 @@ class ExportPreferencesTest {
         val saved = ExportPreferences.fromOptions(options)
         val values = saved.toPreferences()
         assertEquals(saved, ExportPreferences.fromPreferences(values))
-        assertEquals(setOf("export.format", "export.jpegQuality", "export.maxEdge", "export.destination"), values.keys)
+        assertEquals(setOf("export.format", "export.jpegQuality", "export.maxEdge", "export.destination", "export.logEncoding"), values.keys)
         assertFalse(values.keys.any { it.contains("look") || it.contains("frame") })
     }
     @Test fun originalSizeAndInvalidStoredValuesAreHandled() {

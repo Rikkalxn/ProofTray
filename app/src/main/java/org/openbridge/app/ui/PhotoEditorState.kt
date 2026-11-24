@@ -26,6 +26,43 @@ class PhotoEditorState(
     internal val seenDeletions = mutableStateOf(deletedFrameIds)
     internal val frameState = mutableStateOf(createFrameEditor())
     internal val confirmingClose = mutableStateOf(false)
+    private val colorUndo = mutableStateOf<List<ColorLookSettings>>(emptyList())
+    private val colorRedo = mutableStateOf<List<ColorLookSettings>>(emptyList())
+    private var colorGesture: ColorLookSettings? = null
+    internal val canUndoColor: Boolean get() = colorUndo.value.isNotEmpty() || colorGesture?.let { it != look.value } == true
+    internal val canRedoColor: Boolean get() = colorRedo.value.isNotEmpty()
+
+    internal fun changeLook(value: ColorLookSettings) {
+        if (value == look.value) return
+        if (colorGesture == null) colorUndo.value = (colorUndo.value + look.value).takeLast(50)
+        colorRedo.value = emptyList()
+        look.value = value
+    }
+
+    internal fun beginColorGesture() { if (colorGesture == null) colorGesture = look.value }
+    internal fun endColorGesture() {
+        val before = colorGesture ?: return
+        colorGesture = null
+        if (before != look.value) colorUndo.value = (colorUndo.value + before).takeLast(50)
+    }
+
+    internal fun undoColor() {
+        endColorGesture()
+        val previous = colorUndo.value.lastOrNull() ?: return
+        colorUndo.value = colorUndo.value.dropLast(1)
+        colorRedo.value = (colorRedo.value + look.value).takeLast(50)
+        look.value = previous
+        lookKey.value = null
+    }
+
+    internal fun redoColor() {
+        endColorGesture()
+        val next = colorRedo.value.lastOrNull() ?: return
+        colorRedo.value = colorRedo.value.dropLast(1)
+        colorUndo.value = (colorUndo.value + look.value).takeLast(50)
+        look.value = next
+        lookKey.value = null
+    }
     private data class Snapshot(val look: ColorLookSettings, val frame: FrameTemplate?, val historyRevision: Int)
     private fun snapshot() = Snapshot(look.value, frame.value, frameState.value.getOrNull()?.historyRevision ?: 0)
     private val openingSnapshot = snapshot()
@@ -33,6 +70,7 @@ class PhotoEditorState(
     internal val hasChanges: Boolean get() = snapshot() != openingSnapshot
 
     internal fun requestClose(): Boolean {
+        endColorGesture()
         frameState.value.getOrNull()?.endGesture()
         confirmingClose.value = hasChanges
         return !confirmingClose.value

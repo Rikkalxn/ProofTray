@@ -8,11 +8,14 @@ data class PhotoEditSession(val look: ColorLookSettings?, val frame: FrameTempla
 fun photoEditSession(look: ColorLookSettings, frame: FrameTemplate?) = PhotoEditSession(look.takeUnless { it.isIdentity }, frame)
 
 data class ExportEffects(val color: Boolean, val frame: Boolean) {
-    fun forFormat(format: ExportFormat): ExportEffects = if (format == ExportFormat.ORIGINAL) ExportEffects(false, false) else this
+    fun forFormat(format: ExportFormat): ExportEffects =
+        if (format == ExportFormat.ORIGINAL || format == ExportFormat.TIFF) ExportEffects(false, false) else this
 }
 
 /** Unconfirmed output choices survive an editor detour, but never enter SharedPreferences. */
-data class ExportDialogDraft(val preferences: ExportPreferences, val color: Boolean? = null, val frame: Boolean? = null)
+data class ExportDialogDraft(
+    val preferences: ExportPreferences, val color: Boolean? = null, val frame: Boolean? = null, val logGainEv: Float? = null
+)
 
 fun defaultExportEffects(look: ColorLookSettings, frame: FrameTemplate?, assets: List<PhotoAsset>) = ExportEffects(
     color = !look.isIdentity && look.usage.unavailableReason == null && (!look.usesLog || assets.all { it.format == MediaFormat.RAW }),

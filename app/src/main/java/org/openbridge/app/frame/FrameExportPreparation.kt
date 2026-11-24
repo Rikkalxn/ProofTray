@@ -13,6 +13,7 @@ internal fun prepareFrameExport(task: ExportTask, freeze: (FrameSnapshot) -> Fra
         val snapshot = withFrameInitialization {
             require(frame.unavailableReason == null) { frame.unavailableReason.orEmpty() }
             require(task.options.format != ExportFormat.ORIGINAL) { "原件复制不应用边框，请选择 JPEG 或 PNG" }
+            require(task.options.format != ExportFormat.TIFF && task.options.log == null) { "Log 中间文件不应用边框" }
             FrameCodec.validate(frame.template)
             freeze(frame)
         }

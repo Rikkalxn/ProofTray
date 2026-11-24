@@ -33,6 +33,7 @@ import org.openbridge.app.domain.ExportOptions
 import org.openbridge.app.domain.ExportPreferences
 import org.openbridge.app.domain.FrameSnapshot
 import org.openbridge.app.domain.FrameTemplate
+import org.openbridge.app.domain.LogExportSettings
 import org.openbridge.app.domain.MediaFormat
 import org.openbridge.app.domain.PhotoAsset
 import org.openbridge.app.domain.PhotoEditTab
@@ -53,63 +54,95 @@ fun ExportDialog(
     var frameOverride by rememberSaveable { mutableStateOf(initial?.frame) }
     var format by rememberSaveable { mutableStateOf(output.format) }
     val original = format == ExportFormat.ORIGINAL
+    val log = format == ExportFormat.TIFF
+    var photoFormat by rememberSaveable { mutableStateOf(output.format.takeIf { it in photoFormats } ?: ExportFormat.JPEG) }
+    var logEncoding by rememberSaveable {
+        mutableStateOf(look.usage.input?.takeIf { it in LogExportSettings.encodings && output.format != ExportFormat.TIFF }?.name
+            ?: output.logEncoding)
+    }
+    var logGain by rememberSaveable { mutableStateOf(initial?.logGainEv ?: if (look.usesLog) look.logGainEv else 0f) }
     val effects = ExportEffects(colorOverride ?: defaults.color, frameOverride ?: defaults.frame).forFormat(format)
     val applyLook = effects.color
     val applyFrame = effects.frame
     var destination by rememberSaveable { mutableStateOf(output.destination) }
+    val target = if (log) ExportDestination.DIRECTORY else destination
     var quality by rememberSaveable { mutableStateOf(output.jpegQuality.toFloat()) }
     var maxEdge by rememberSaveable { mutableStateOf(output.maxEdge) }
     fun change(tab: PhotoEditTab) {
-        onChange(tab, ExportDialogDraft(ExportPreferences(format, quality.toInt(), maxEdge, destination), colorOverride, frameOverride))
+        onChange(tab, ExportDialogDraft(ExportPreferences(format, quality.toInt(), maxEdge, target, logEncoding),
+            colorOverride, frameOverride, logGain))
     }
     val unavailable = look.usage.unavailableReason
     val compatible = !look.usesLog || assets.all { it.format == MediaFormat.RAW }
     val unsupported = assets.count { !it.format.supportsRendering }
     val requiresRaw = applyLook && !compatible
+    val logCompatible = assets.all { it.format == MediaFormat.RAW }
     BridgeSheet(title = if (assets.size == 1) "导出照片" else "导出 ${assets.size} 张照片", onDismiss = onDismiss, compact = true,
         actions = {
             TextButton(onClick = onDismiss) { Text("取消") }
             Spacer(Modifier.weight(1f))
-            PrimaryAction(if (destination == ExportDestination.GALLERY) "导出到相册" else "选择文件夹",
-                enabled = assets.isNotEmpty() && (original || unsupported == 0) && !requiresRaw && (!applyLook || unavailable == null),
+            PrimaryAction(if (target == ExportDestination.GALLERY) "导出到相册" else "选择文件夹",
+                enabled = assets.isNotEmpty() && (original || unsupported == 0) && (!log || logCompatible) &&
+                    !requiresRaw && (!applyLook || unavailable == null),
                 onClick = {
                     onExport(ExportOptions(format, quality.toInt(), maxEdge, look.takeIf { applyLook && !it.isIdentity },
-                        destination, frame?.takeIf { applyFrame }?.let(::FrameSnapshot)))
+                        target, frame?.takeIf { applyFrame }?.let(::FrameSnapshot),
+                        if (log) LogExportSettings(logEncoding, look.exposure, look.warmth, logGain, look.tint) else null))
                     onDismiss()
                 }, glyph = BridgeGlyph.SHARE)
         }) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (assets.size == 1) Text(assets.single().name, Modifier.fillMaxWidth(), maxLines = 1, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("调色 · " + if (look.isIdentity) "原图" else look.name, Modifier.weight(1f), maxLines = 1,
-                    overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
-                Switch(checked = applyLook && !look.isIdentity, enabled = !original && !look.isIdentity && unavailable == null,
-                    onCheckedChange = { colorOverride = it })
-                TextButton(onClick = { change(PhotoEditTab.COLOR) }, enabled = editable) { Text("更改") }
+            val kind = when { log -> ExportKind.LOG; original -> ExportKind.ORIGINAL; else -> ExportKind.PHOTO }
+            OptionRow("导出", ExportKind.entries, kind, { it.label }) { selected ->
+                format = when (selected) {
+                    ExportKind.PHOTO -> photoFormat
+                    ExportKind.ORIGINAL -> ExportFormat.ORIGINAL
+                    ExportKind.LOG -> ExportFormat.TIFF
+                }
+                if (selected == ExportKind.LOG && !log) maxEdge = 0
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("边框 · " + (frame?.name ?: "无"), Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.titleSmall)
-                Switch(checked = applyFrame && frame != null, enabled = !original && frame != null, onCheckedChange = { frameOverride = it })
-                TextButton(onClick = { change(PhotoEditTab.FRAME) }, enabled = editable) { Text("更改") }
+            if (log) {
+                LogExportControls(logEncoding, logGain, look, { logEncoding = it }, { logGain = it },
+                    onEdit = { change(PhotoEditTab.COLOR) }, canEdit = editable && logCompatible)
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("调色 · " + if (look.isIdentity) "原图" else look.name, Modifier.weight(1f), maxLines = 1,
+                        overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
+                    Switch(checked = applyLook && !look.isIdentity, enabled = !original && !look.isIdentity && unavailable == null,
+                        onCheckedChange = { colorOverride = it })
+                    TextButton(onClick = { change(PhotoEditTab.COLOR) }, enabled = editable) { Text("更改") }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("边框 · " + (frame?.name ?: "无"), Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.titleSmall)
+                    Switch(checked = applyFrame && frame != null, enabled = !original && frame != null, onCheckedChange = { frameOverride = it })
+                    TextButton(onClick = { change(PhotoEditTab.FRAME) }, enabled = editable) { Text("更改") }
+                }
             }
-            OptionRow("格式", ExportFormat.entries, format, { it.label() }) { format = it }
+            if (!original && !log) OptionRow("格式", photoFormats, format, { it.label() }) { format = it; photoFormat = it }
+            if (log) Text("16 位 TIFF · 全范围", style = MaterialTheme.typography.bodySmall)
             if (original) Text("原件复制不应用调色和边框", style = MaterialTheme.typography.bodySmall)
             else OptionRow("长边", listOf(2048, 4096, 0), maxEdge, { if (it == 0) "原尺寸" else "$it px" }) { maxEdge = it }
             if (format == ExportFormat.JPEG) Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("质量 ${quality.toInt()}", Modifier.width(72.dp), style = MaterialTheme.typography.labelLarge)
                 Slider(value = quality, onValueChange = { quality = it }, valueRange = 1f..100f, modifier = Modifier.weight(1f))
             }
-            OptionRow("保存到", ExportDestination.entries, destination, {
+            if (log) Text("保存到文件夹，供支持 Log 的软件继续调色。", style = MaterialTheme.typography.bodySmall)
+            else OptionRow("保存到", ExportDestination.entries, destination, {
                 if (it == ExportDestination.GALLERY) "系统相册" else "文件夹"
             }) { destination = it }
             if (!original && unsupported > 0) Text("$unsupported 张照片暂不支持转换，请选择原件复制。", color = MaterialTheme.colorScheme.error)
             if (requiresRaw) Text("Log 输入需要 RAW 原片", color = MaterialTheme.colorScheme.error)
+            if (log && !logCompatible) Text("Log 直出需要 RAW 原片，请只选择 RAW 照片。", color = MaterialTheme.colorScheme.error)
             if (applyLook && unavailable != null) Text(unavailable, color = MaterialTheme.colorScheme.error)
         }
     }
 }
+
+private enum class ExportKind(val label: String) { PHOTO("成片"), LOG("Log"), ORIGINAL("原件复制") }
+private val photoFormats = listOf(ExportFormat.JPEG, ExportFormat.PNG)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -129,4 +162,5 @@ internal fun ExportFormat.label(): String = when (this) {
     ExportFormat.ORIGINAL -> "原件复制"
     ExportFormat.JPEG -> "JPEG"
     ExportFormat.PNG -> "PNG"
+    ExportFormat.TIFF -> "Log TIFF"
 }

@@ -4,10 +4,13 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "openbridge/color_adjustments.h"
 
 namespace openbridge {
 
@@ -38,6 +41,9 @@ struct ColorLook {
   float warmth = 0;
   LutEncoding input_encoding = LutEncoding::Direct;
   LutEncoding output_encoding = LutEncoding::Direct;
+  int render_version = 1;
+  float tint = 0;
+  ColorAdjustments adjustments;
 };
 
 ColorLut ParseCube(std::string_view source);
@@ -51,6 +57,11 @@ void ValidateLook(const ColorLook& look);
 Rgb SampleLut(const ColorLut& lut, const Rgb& input);
 // The input to ApplyColorLook must be finite, normalized sRGB.
 Rgb ApplyColorLook(const Rgb& srgb, const ColorLook& look, const ColorLut* lut);
+Rgb ApplyDisplayLut(const Rgb& srgb, const ColorLook& look, const ColorLut* lut);
+// Version 2 display edits are baked at 65^3. RAW and Log share this post-LUT table; JPEG bakes the whole point pipeline.
+Rgb ApplyDisplayAdjustments(const Rgb& srgb, const ColorLook& look);
+std::shared_ptr<const ColorLut> DisplayAdjustmentsTable(const ColorLook& look);
+ColorLut BakeColorLook(const ColorLook& look, const ColorLut* lut);
 // Mutable SDR sRGB RGBA8 pixels. Alpha is preserved; premultiplied buffers are unpremultiplied for grading.
 void ApplyColorLookRgba(std::span<uint8_t> pixels, size_t width, size_t height, size_t stride, bool premultiplied,
                         const ColorLook& look, const ColorLut* lut);

@@ -146,6 +146,8 @@ private fun LicenseSheet(onDismiss: () -> Unit) {
         LicenseEntry("furble", "MIT", furbleLicense, noticeUrl = furbleLicense, onOpen = openLink)
         LicenseEntry("LibRaw 0.23.0-Snapshot202611", "LGPL-2.1", "$librawSource/LICENSE.LGPL",
             noticeUrl = "$librawSource/COPYRIGHT", onOpen = openLink)
+        LicenseEntry("libtiff 4.7.2", "libtiff license",
+            "https://gitlab.com/libtiff/libtiff/-/blob/v4.7.2/LICENSE.md", onOpen = openLink)
         LicenseEntry("Adobe DNG SDK 参考呈现", "DNG SDK License",
             "https://android.googlesource.com/platform/external/dng_sdk/+/de700ad461e35af50b28b861943a0b0753b10929/LICENSE", onOpen = openLink)
         LicenseEntry("Nordic Android BLE", "BSD-3-Clause", "https://github.com/nordicsemi/Android-BLE-Library/blob/2.11.0/LICENSE", onOpen = openLink)

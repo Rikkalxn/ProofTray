@@ -21,6 +21,8 @@ struct RawDisplayGrade {
   Rgb warmth_gain;
   ColorLook display_look;
   float strength;
+  std::shared_ptr<const ColorLut> display_edits;
+  bool modern = false;
 };
 
 // DNG SDK SDR reference: linear ProPhoto D50, exposure/shadow ramp, ACR3 RGB tone, final sRGB conversion/encoding.

@@ -5,6 +5,7 @@
 | 依赖 | 管理方式 | 原因与更新方式 |
 | --- | --- | --- |
 | LibRaw | `libraw/upstream` Git submodule，父仓库记录完整提交号 | 完整使用独立上游库，需要持续更新机型和解码支持；升级时审查源码、接口、构建清单和样片。 |
+| libtiff | `libtiff/upstream` Git submodule，固定 4.7.2 提交 | Log RGB16 TIFF 写出；仅启用 zlib/Deflate，升级说明见 `libtiff/README.md`。 |
 | furble | 保留 `furble/` 中的 Blowfish 源码和 MIT 许可 | 仅使用两个源码文件及独立的配对哈希适配，不引入完整相机遥控固件；按需要人工核对相关上游改动。 |
 | Adobe DNG SDK 参考呈现 | 保留适配后的 core 代码与许可、来源提交 | 属于移植的呈现阶段，并未链接完整 SDK；升级需要对照参考实现审查算法。 |
 | AndroidX、Kotlin、Nordic BLE、JSch、Okio 等 | Gradle/Maven 固定版本和 Compose BOM | 包管理器负责依赖解析及传递依赖，源码 submodule 不代替这些制品。 |
@@ -24,4 +25,4 @@ git submodule update --init --recursive
 独立核心测试只依赖保留在父仓库的 furble 摘取代码；Android RAW 和桌面 RAW 工具需要初始化 LibRaw。
 
 GitHub 自动生成的源码归档不展开 submodule；获取完整源码请递归克隆。
-如另行制作发布源码包，需要包含对应 LibRaw 提交的完整源码、许可证，以及本仓库的 JNI 和构建适配文件。
+如另行制作发布源码包，需要包含对应 LibRaw、libtiff 提交的完整源码、许可证，以及本仓库的 JNI 和构建适配文件。

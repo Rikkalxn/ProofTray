@@ -75,13 +75,14 @@ data class PhotoGroup(val id: String, val members: List<PhotoAsset>, val inferre
 data class CatalogResult(val groups: List<PhotoGroup>, val matchedCount: Int, val pendingMetadataCount: Int)
 data class SavedFilter(val id: String, val name: String, val spec: FilterSpec)
 
-enum class ExportFormat { ORIGINAL, JPEG, PNG }
+enum class ExportFormat { ORIGINAL, JPEG, PNG, TIFF }
 enum class ExportDestination { GALLERY, DIRECTORY }
 enum class ExportStatus { QUEUED, RUNNING, COMPLETED, FAILED, CANCELLED }
 
 data class ExportOptions(
     val format: ExportFormat = ExportFormat.JPEG, val jpegQuality: Int = 95, val maxEdge: Int = 4096,
-    val look: ColorLookSettings? = null, val destination: ExportDestination = ExportDestination.GALLERY, val frame: FrameSnapshot? = null
+    val look: ColorLookSettings? = null, val destination: ExportDestination = ExportDestination.GALLERY, val frame: FrameSnapshot? = null,
+    val log: LogExportSettings? = null
 )
 data class ExportTask(
     val id: String,

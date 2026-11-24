@@ -75,13 +75,16 @@ internal class ExportOutputStore(context: Context) {
             ExportFormat.ORIGINAL -> task.asset.name.substringAfterLast('.', "bin").filter(Char::isLetterOrDigit).take(12).ifBlank { "bin" }
             ExportFormat.JPEG -> "jpg"
             ExportFormat.PNG -> "png"
+            ExportFormat.TIFF -> "tif"
         }
-        return "${stem}_ProofTray_${task.id.take(8)}.$extension"
+        val suffix = task.options.log?.encoding?.name?.let { "_${it}_Log16" }.orEmpty()
+        return "${stem}_ProofTray${suffix}_${task.id.take(8)}.$extension"
     }
 
     private fun outputMime(task: ExportTask): String = when (task.options.format) {
         ExportFormat.JPEG -> "image/jpeg"
         ExportFormat.PNG -> "image/png"
+        ExportFormat.TIFF -> "image/tiff"
         ExportFormat.ORIGINAL -> photoMimeType(task.asset.name) ?: resolver.getType(Uri.parse(task.asset.uri)) ?: "application/octet-stream"
     }
 }

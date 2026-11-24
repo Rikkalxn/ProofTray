@@ -32,6 +32,7 @@ class LutRepository private constructor(context: Context) {
     private val root = File(context.filesDir, "color-library").apply { mkdirs() }
     private val lock = Any()
     private val handles = linkedMapOf<String, Long>()
+    private val previewTables = linkedMapOf<ColorLookSettings, LutPreviewData>()
 
     suspend fun luts(includeRemoved: Boolean = false): List<LutAsset> = withContext(Dispatchers.IO) { synchronized(lock) {
         root.listFiles()?.filter { it.name.endsWith(".lut.json") }?.mapNotNull { readTableMetadata(it) }
@@ -231,7 +232,7 @@ class LutRepository private constructor(context: Context) {
 
     private fun importPreset(bytes: ByteArray, fallbackName: String): ColorImportResult {
         val json = LookCodec.checkedJson(bytes.toString(Charsets.UTF_8))
-        require(json.optString("schema") == LookCodec.PRESET_SCHEMA && json.optInt("version") == LookCodec.PRESET_VERSION) {
+        require(json.optString("schema") == LookCodec.PRESET_SCHEMA && json.optInt("version") in 1..LookCodec.PRESET_VERSION) {
             "请选择 .oblook 预设，暂不支持 Lightroom XMP。"
         }
         var look = LookCodec.decode(json.getJSONObject("look"))
@@ -267,11 +268,24 @@ class LutRepository private constructor(context: Context) {
         LutPreviewData(id, info[0].toInt(), info[1].toInt(), info.copyOfRange(2, 5), info.copyOfRange(5, 8), NativeColor.values(handle, false))
     }
 
+    fun previewData(look: ColorLookSettings): LutPreviewData = synchronized(lock) {
+        look.validate()
+        require(look.renderVersion == 2 && !look.usesLog) { "此配方不能烘焙为显示预览" }
+        val key = look.copy(name = "")
+        previewTables.remove(key)?.let { previewTables[key] = it; return it }
+        val values = NativeColor.bake(look.lutId?.let(::handle) ?: 0L, look.parameters(), look.adjustments.parameters(),
+            checkNotNull(look.usage.input).nativeCode, checkNotNull(look.usage.output).nativeCode)
+        val table = LutPreviewData(UUID.randomUUID().toString(), 3, 65, floatArrayOf(0f, 0f, 0f), floatArrayOf(1f, 1f, 1f), values)
+        previewTables[key] = table
+        while (previewTables.size > 2) previewTables.remove(previewTables.keys.first())
+        table
+    }
+
     fun apply(bitmap: Bitmap, look: ColorLookSettings) = synchronized(lock) {
         look.validate()
         require(!look.usesLog) { "Log 输入需要 RAW 原片" }
         require(bitmap.isMutable && bitmap.config == Bitmap.Config.ARGB_8888) { "调色需要可写的 sRGB RGBA8 位图" }
-        NativeColor.apply(look.lutId?.let(::handle) ?: 0L, bitmap, look.parameters(), bitmap.isPremultiplied,
+        NativeColor.apply(look.lutId?.let(::handle) ?: 0L, bitmap, look.parameters(), look.adjustments.parameters(), bitmap.isPremultiplied,
             checkNotNull(look.usage.input).nativeCode, checkNotNull(look.usage.output).nativeCode)
     }
 

@@ -9,6 +9,7 @@ import org.openbridge.app.domain.ExportOptions
 import org.openbridge.app.domain.ExportStatus
 import org.openbridge.app.domain.ExportTask
 import org.openbridge.app.domain.FilterSpec
+import org.openbridge.app.domain.LogExportSettings
 import org.openbridge.app.domain.MediaFormat
 import org.openbridge.app.domain.OrientationFilter
 import org.openbridge.app.domain.PhotoAsset
@@ -146,6 +147,14 @@ internal object RecordCodec {
             put("destination", task.options.destination.name)
             put("look", task.options.look?.let(LookCodec::encode) ?: JSONObject.NULL)
             put("frame", task.options.frame?.let(org.openbridge.app.frame.FrameCodec::encodeSnapshot) ?: JSONObject.NULL)
+            put("log", task.options.log?.let { log -> JSONObject().apply {
+                put("version", 1)
+                put("encoding", log.encodingName)
+                put("exposure", log.exposure.toDouble())
+                put("warmth", log.warmth.toDouble())
+                put("gainEv", log.gainEv.toDouble())
+                put("tint", log.tint.toDouble())
+            } } ?: JSONObject.NULL)
         })
         put("destinationUri", task.destinationUri)
         put("status", task.status.name)
@@ -162,7 +171,12 @@ internal object RecordCodec {
                 ExportFormat.valueOf(options.getString("format")), options.optInt("jpegQuality", 95), options.optInt("maxEdge", 0),
                 options.optJSONObject("look")?.let(LookCodec::decode),
                 ExportDestination.valueOf(options.optString("destination", ExportDestination.DIRECTORY.name)),
-                options.optJSONObject("frame")?.let(org.openbridge.app.frame.FrameCodec::decodeSnapshot)
+                options.optJSONObject("frame")?.let(org.openbridge.app.frame.FrameCodec::decodeSnapshot),
+                options.optJSONObject("log")?.let { log ->
+                    val encoding = if (log.optInt("version", -1) == 1) log.optString("encoding", "") else "unsupported-version"
+                    LogExportSettings(encoding, log.logNumber("exposure"), log.logNumber("warmth"), log.logNumber("gainEv"),
+                        if (log.has("tint")) log.logNumber("tint") else 0f)
+                }
             ),
             destinationUri = json.getString("destinationUri"), status = ExportStatus.valueOf(json.getString("status")),
             progress = json.optDouble("progress", 0.0).toFloat(), outputUri = json.stringOrNull("outputUri"), message = json.stringOrNull("message")
@@ -170,6 +184,8 @@ internal object RecordCodec {
     }
 
     private fun JSONObject.putNullable(key: String, value: Any?) { put(key, value ?: JSONObject.NULL) }
+    // Preserve an invalid task as a persistable failure: JSONObject cannot serialize NaN/Infinity.
+    private fun JSONObject.logNumber(key: String): Float = optDouble(key, Double.NaN).toFloat().takeIf(Float::isFinite) ?: Float.MAX_VALUE
     private fun JSONObject.longOrNull(key: String): Long? = if (isNull(key)) null else getLong(key)
     private fun JSONObject.intOrNull(key: String): Int? = if (isNull(key)) null else getInt(key)
     private fun JSONObject.doubleOrNull(key: String): Double? = if (isNull(key)) null else getDouble(key)

@@ -2,12 +2,13 @@ package org.openbridge.app.color
 
 import org.json.JSONObject
 import org.openbridge.app.domain.ColorLookSettings
+import org.openbridge.app.domain.ColorAdjustments
 import org.openbridge.app.domain.LutRange
 import org.openbridge.app.domain.LutUsage
 
 object LookCodec {
     const val PRESET_SCHEMA = "org.openbridge.look"
-    const val PRESET_VERSION = 1
+    const val PRESET_VERSION = 2
 
     fun encodeUsage(usage: LutUsage) = JSONObject().apply {
         put("input", usage.inputName); put("output", usage.outputName)
@@ -25,10 +26,15 @@ object LookCodec {
         put("saturation", look.saturation.toDouble()); put("warmth", look.warmth.toDouble())
         put("lutUsage", encodeUsage(look.usage))
         if (look.usesLog || look.usage.unavailableReason != null) put("logGainEv", look.logGainEv.toDouble())
+        put("renderVersion", look.renderVersion)
+        if (look.renderVersion >= 2) {
+            put("tint", look.tint.toDouble())
+            put("adjustments", ColorAdjustmentsCodec.encode(look.adjustments))
+        }
     }
 
     fun presetEnvelope(name: String, look: ColorLookSettings): JSONObject = JSONObject().apply {
-        put("schema", PRESET_SCHEMA); put("version", PRESET_VERSION); put("name", name); put("look", encode(look))
+        put("schema", PRESET_SCHEMA); put("version", look.renderVersion); put("name", name); put("look", encode(look))
     }
 
     fun decode(json: JSONObject): ColorLookSettings {
@@ -42,7 +48,10 @@ object LookCodec {
             name = json.optString("name", "自定义").take(128), lutId = if (json.isNull("lutId")) null else json.getString("lutId"),
             strength = number("strength", 1f), exposure = number("exposure", 0f), contrast = number("contrast", 0f),
             saturation = number("saturation", 1f), warmth = number("warmth", 0f),
-            usage = decodeUsage(json.getJSONObject("lutUsage")), logGainEv = number(if (json.has("logGainEv")) "logGainEv" else "nlogGainEv", 0f)
+            usage = decodeUsage(json.getJSONObject("lutUsage")), logGainEv = number(if (json.has("logGainEv")) "logGainEv" else "nlogGainEv", 0f),
+            renderVersion = number("renderVersion", 1f).also { require(it == 1f || it == 2f) { "不支持此编辑配方版本" } }.toInt(),
+            tint = number("tint", 0f),
+            adjustments = if (json.has("adjustments")) ColorAdjustmentsCodec.decode(json.getJSONObject("adjustments")) else ColorAdjustments()
         ).also { it.validateParameters() }
     }
 

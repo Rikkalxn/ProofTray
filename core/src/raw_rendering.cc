@@ -114,6 +114,15 @@ Rgb RenderRawDefault(const Rgb& input, const RawDisplayTransform& transform) {
 RawDisplayGrade PrepareRawDisplayGrade(const RawRenderSettings& settings, const ColorLook& look) {
   ValidateLook(look);
   auto display = look;
+  if (look.render_version == 2) {
+    display.exposure_ev = display.warmth = display.tint = display.contrast = 0;
+    display.saturation = 1;
+    display.adjustments = {};
+    const auto base = PrepareRawDefault(settings);
+    const float exposure = std::exp2(look.exposure_ev);
+    return {base, base, {exposure * std::exp2(look.warmth * .25f), exposure * std::exp2(-look.tint * .25f),
+                         exposure * std::exp2(-look.warmth * .25f)}, display, look.strength, DisplayAdjustmentsTable(look), true};
+  }
   display.strength = 1;
   display.exposure_ev = display.warmth = 0;
   return {PrepareRawDefault(settings), PrepareRawDefault(settings, look.exposure_ev),
@@ -121,6 +130,12 @@ RawDisplayGrade PrepareRawDisplayGrade(const RawRenderSettings& settings, const 
 }
 
 Rgb RenderRawDisplayPixel(const Rgb& linear, const ColorLut* lut, const RawDisplayGrade& grade) {
+  if (grade.modern) {
+    auto input = linear;
+    for (int c = 0; c < 3; ++c) input[c] *= grade.warmth_gain[c];
+    const auto display = ApplyDisplayLut(RenderRawDefault(input, grade.adjusted), grade.display_look, lut);
+    return grade.display_edits ? SampleLut(*grade.display_edits, display) : display;
+  }
   if (grade.strength == 0) return RenderRawDefault(linear, grade.base);
   auto adjusted = linear;
   for (size_t i = 0; i < adjusted.size(); ++i) adjusted[i] *= grade.warmth_gain[i];

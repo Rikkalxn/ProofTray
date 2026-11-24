@@ -8,7 +8,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -36,14 +35,11 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.DisposableEffect
@@ -80,6 +76,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.withContext
 import org.openbridge.app.color.GlColorView
 import org.openbridge.app.data.LinearRawPreview
@@ -93,30 +91,11 @@ import org.openbridge.app.domain.PhotoAsset
 import java.util.Locale
 import kotlin.math.roundToInt
 
-private data class ColorPreviewLut(val data: LutPreviewData? = null, val error: String? = null, val loading: Boolean = false)
+private data class ColorPreviewLut(
+    val data: LutPreviewData? = null, val error: String? = null, val loading: Boolean = false, val recipe: ColorLookSettings? = null
+)
 
 private data class LookOption(val key: String, val name: String, val look: ColorLookSettings)
-
-private enum class Adjustment(val label: String, val range: ClosedFloatingPointRange<Float>, val neutral: Float, val pattern: String) {
-    EXPOSURE("曝光", -3f..3f, 0f, "%+.1f"), CONTRAST("对比度", -1f..1f, 0f, "%+.2f"),
-    SATURATION("饱和度", 0f..2f, 1f, "%.2f"), WARMTH("冷暖", -1f..1f, 0f, "%+.2f");
-
-    fun of(look: ColorLookSettings): Float = when (this) {
-        EXPOSURE -> look.exposure
-        CONTRAST -> look.contrast
-        SATURATION -> look.saturation
-        WARMTH -> look.warmth
-    }
-
-    fun set(look: ColorLookSettings, value: Float): ColorLookSettings = when (this) {
-        EXPOSURE -> look.copy(exposure = value)
-        CONTRAST -> look.copy(contrast = value)
-        SATURATION -> look.copy(saturation = value)
-        WARMTH -> look.copy(warmth = value)
-    }.copy(name = "自定义")
-
-    fun format(value: Float): String = String.format(Locale.ROOT, pattern, value)
-}
 
 private const val ORIGINAL_KEY = "original"
 private const val THUMBNAIL_EDGE = 192f
@@ -130,6 +109,7 @@ internal fun ColorEditor(
     asset: PhotoAsset, state: LibraryUiState, actions: LibraryActions, look: ColorLookSettings, onLookChange: (ColorLookSettings) -> Unit,
     selectedLookKey: String?, onLookKeyChange: (String) -> Unit, onImport: () -> Unit,
     photos: PhotoEditSource, graded: ColorPreviewSource, allowLog: Boolean, onReady: (Boolean) -> Unit, onRetry: () -> Unit,
+    canUndo: Boolean, canRedo: Boolean, onUndo: () -> Unit, onRedo: () -> Unit, onGesture: (Boolean) -> Unit,
     header: PhotoEditHeaderContent, status: @Composable () -> Unit, pager: @Composable BoxScope.() -> Unit
 ) {
     val context = LocalContext.current
@@ -144,7 +124,6 @@ internal fun ColorEditor(
     }
     val lookKey = selectedLookKey ?: options.firstOrNull { it.look == look }?.key ?: look.lutKey ?: ORIGINAL_KEY
     var tab by rememberSaveable { mutableStateOf(0) }
-    var adjustment by rememberSaveable { mutableStateOf(Adjustment.EXPOSURE) }
     var original by remember { mutableStateOf(false) }
     var holding by remember { mutableStateOf(false) }
     var library by remember { mutableStateOf(false) }
@@ -160,11 +139,11 @@ internal fun ColorEditor(
     val normal = photos.normal
     val raw = photos.raw
     val glLeases = remember { mutableMapOf<GlColorView, EditBitmap.Lease>() }
-    val logLook = if (original || holding) look.copy(strength = 0f) else look
+    val logLook = if (original || holding) ColorLookSettings() else look
     val source = if (raw) {
         if (linear.error != null) ColorPreviewSource(error = linear.error)
         else if (original || holding) {
-            if (look.usesLog) linearLookPreview(linear.frame, logLook, repository) else normal.copy(renderedLook = logLook)
+            normal.copy(renderedLook = logLook)
         } else graded
     } else normal
     val thumbBase = normal.image
@@ -179,16 +158,27 @@ internal fun ColorEditor(
             }
         }
     }
-    val lut by produceState(ColorPreviewLut(), look.lutId, look.usesLog, raw) {
-        value = ColorPreviewLut(loading = look.lutId != null)
-        val id = look.lutId
-        value = if (id == null || look.usesLog || raw) ColorPreviewLut() else withContext(Dispatchers.IO) {
-            try { ColorPreviewLut(repository.previewData(id)) }
-            catch (cancelled: CancellationException) { throw cancelled }
-            catch (error: Exception) { ColorPreviewLut(error = error.message ?: "无法载入 LUT") }
+    val liveLook by rememberUpdatedState(look)
+    val lut by produceState(ColorPreviewLut(), raw) {
+        // Keep one bake in flight and then render the newest recipe; continuous drags must not wait for a debounce pause.
+        snapshotFlow { liveLook.copy(name = "") }.conflate().collect { recipe ->
+            val id = recipe.lutId
+            val needed = !recipe.isIdentity && (recipe.renderVersion == 2 || id != null) && !recipe.usesLog && !raw
+            if (needed && recipe.renderVersion == 1 && value.data?.id == id && value.error == null) {
+                value = value.copy(loading = false, recipe = recipe)
+                return@collect
+            }
+            if (needed) value = value.copy(loading = true, error = null)
+            value = if (!needed) ColorPreviewLut(recipe = recipe) else withContext(Dispatchers.IO) {
+                try {
+                    val data = if (recipe.renderVersion == 2) repository.previewData(recipe) else repository.previewData(checkNotNull(id))
+                    ColorPreviewLut(data = data, recipe = recipe)
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (error: Exception) { ColorPreviewLut(error = error.message ?: "无法载入 LUT", recipe = recipe) }
+            }
         }
     }
-    val displayedLook = if (original || holding || lut.loading || lut.error != null) ColorLookSettings(strength = 0f) else look
+    val displayedLook = if (original || holding || lut.error != null) ColorLookSettings() else look
     val compatible = !raw && !look.usesLog && (gpuFailed || !supportsGpu || lut.data?.dimension == 1)
     val cpu = rememberEditResult(ColorPreviewSource(), source.image, displayedLook, compatible) {
         val image = source.image ?: return@rememberEditResult ColorPreviewSource()
@@ -218,12 +208,14 @@ internal fun ColorEditor(
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer); view?.onPause() }
     }
+    val tableReady = look.renderVersion == 1 || look.isIdentity || lut.recipe == look.copy(name = "")
     val ready = if (raw) (!look.usesLog || allowLog) && source.renderedLook == logLook && source.bitmap != null && source.error == null
         else source.bitmap != null && source.error == null && lut.error == null && !lut.loading && renderError == null && cpu.error == null &&
-            (!compatible || (cpu.image != null && cpu.renderedLook == displayedLook))
+            tableReady && (!compatible || (cpu.image != null && cpu.renderedLook == displayedLook))
     val blendable = look.copy(name = "", strength = 1f) != ColorLookSettings(name = "")
     val savable = blendable && state.colorPresets.none { it.look.copy(name = look.name) == look }
     SideEffect { onReady(ready) }
+    CompositionLocalProvider(LocalColorGesture provides onGesture) {
     Column(Modifier.fillMaxSize()) {
         header { _ -> }
         status()
@@ -243,7 +235,7 @@ internal fun ColorEditor(
                         glView = view; glLeases[view] = checkNotNull(source.image).retain()
                     } },
                     modifier = Modifier.fillMaxSize(),
-                    update = { it.update(bitmap, lut.data, displayedLook) },
+                    update = { it.update(bitmap, lut.data.takeUnless { displayedLook.isIdentity }, displayedLook) },
                     onReset = null,
                     onRelease = { it.releasePreview(); glLeases.remove(it)?.close(); if (glView === it) glView = null }
                 )
@@ -255,10 +247,6 @@ internal fun ColorEditor(
         }
         Column(Modifier.heightIn(max = controlsHeight).verticalScroll(rememberScrollState()).padding(vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (raw && linear.frame != null) {
-                Text(if (look.usesLog) "RAW · 线性输入" else "RAW 显影 · 标准",
-                    Modifier.padding(horizontal = 20.dp), style = MaterialTheme.typography.labelSmall)
-            }
             state.errorMessage?.let { message ->
                 ErrorNotice(message, Modifier.padding(horizontal = 20.dp)) {
                     IconButton(onClick = actions.onDismissError) { BridgeIcon(BridgeGlyph.CLOSE, "关闭提示") }
@@ -267,21 +255,32 @@ internal fun ColorEditor(
             (lut.error ?: renderError ?: cpu.error)?.let { message ->
                 ErrorNotice(message, Modifier.padding(horizontal = 20.dp)) { TextButton(onClick = onRetry) { Text("重试") } }
             }
-            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
-                listOf("风格", "调整").forEachIndexed { index, label ->
-                    SegmentedButton(selected = tab == index, onClick = { tab = index },
-                        shape = SegmentedButtonDefaults.itemShape(index, 2)) { Text(label) }
+            Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                val sourceLabel = when {
+                    look.renderVersion == 1 -> "兼容旧版预设"
+                    raw -> if (look.usesLog) "RAW · Log" else "RAW · 标准"
+                    else -> "照片调色"
                 }
+                Text(sourceLabel, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                IconButton(onClick = onUndo, enabled = canUndo, modifier = Modifier.size(40.dp)) { BridgeIcon(BridgeGlyph.UNDO, "撤销调色") }
+                IconButton(onClick = onRedo, enabled = canRedo, modifier = Modifier.size(40.dp)) { BridgeIcon(BridgeGlyph.REDO, "重做调色") }
             }
+            ColorToolTabs(tab) { onGesture(false); tab = it }
             if (!allowLog && options.any { it.look.usesLog }) Text("所选照片含非 RAW，Log LUT 不可用",
                 Modifier.padding(horizontal = 20.dp), style = MaterialTheme.typography.bodySmall)
             if (tab == 0) {
                 @Composable
                 fun OptionTile(option: LookOption) = LookTile(option.name, lookKey == option.key, onClick = {
-                    onLookChange(option.look); onLookKeyChange(option.key); renderError = null
+                    val selected = when {
+                        option.key == ORIGINAL_KEY -> look.withoutLut()
+                        option.key.startsWith("lut:") -> look.withLut(option.look)
+                        else -> option.look
+                    }
+                    onLookChange(selected); onLookKeyChange(option.key); renderError = null
                         }, enabled = allowLog || !option.look.usesLog) { LookThumbnail(thumbnail.image, linear.thumb, option.look, repository) }
                 LazyRow(contentPadding = PaddingValues(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    item(key = ORIGINAL_KEY) { OptionTile(options.first()) }
+                    item(key = ORIGINAL_KEY) { OptionTile(options.first().copy(name = if (look.renderVersion == 2) "无 LUT" else "原图")) }
                     item(key = "import") {
                         LookTile(if (state.colorBusy) "正在导入" else "导入 LUT", false,
                             onClick = { onImport() }, enabled = !state.colorBusy) {
@@ -352,33 +351,25 @@ internal fun ColorEditor(
                     }
                 }
                 val defaultStrength = if (lutId != null) DEFAULT_LUT_STRENGTH else 1f
-                if (blendable) EditorSlider("强度", look.strength, 0f..1f, "${(look.strength * 100).roundToInt()}%",
-                    onReset = if (look.strength != defaultStrength) ({ onLookChange(look.copy(strength = defaultStrength)) }) else null) {
-                    onLookChange(look.copy(strength = it))
-                }
-            } else {
-                Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 20.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Adjustment.entries.forEach { option ->
-                        val value = option.of(look)
-                        FilterChip(selected = adjustment == option, onClick = { adjustment = option },
-                            label = { Text(if (value == option.neutral) option.label else "${option.label} ${option.format(value)}") })
+                if (blendable && (look.renderVersion == 1 || lutId != null))
+                    EditorSlider(if (look.renderVersion == 2) "LUT 强度" else "整体强度", look.strength, 0f..1f,
+                        "${(look.strength * 100).roundToInt()}%",
+                        onReset = if (look.strength != defaultStrength) ({ onLookChange(look.copy(strength = defaultStrength)) }) else null) {
+                        onLookChange(look.copy(strength = it))
                     }
-                }
-                val value = adjustment.of(look)
-                EditorSlider(adjustment.label, value, adjustment.range, adjustment.format(value),
-                    onReset = if (value != adjustment.neutral) ({ onLookChange(adjustment.set(look, adjustment.neutral)) }) else null) {
-                    onLookChange(adjustment.set(look, it))
-                }
+            } else {
+                AdvancedColorControls(tab, look, onLookChange)
             }
             if (savable) TextButton(onClick = { saving = true }, enabled = ready, modifier = Modifier.padding(horizontal = 8.dp)) {
                 Text("存为预设")
             }
         }
     }
+    }
     if (library) ColorLibrarySheet(state, actions, allowLog = allowLog, onPick = { picked ->
-        onLookChange(picked)
-        onLookKeyChange(options.firstOrNull { it.look == picked }?.key ?: picked.lutKey ?: ORIGINAL_KEY)
+        val key = options.firstOrNull { it.look == picked }?.key ?: picked.lutKey ?: ORIGINAL_KEY
+        onLookChange(if (key.startsWith("lut:")) look.withLut(picked) else picked)
+        onLookKeyChange(key)
         renderError = null
     }) { library = false }
     if (rawReferenceInfo) AlertDialog(onDismissRequest = { rawReferenceInfo = false }, title = { Text("RAW 曝光参考") },
@@ -431,20 +422,4 @@ private fun LookThumbnail(base: EditBitmap?, linear: LinearRawPreview?, look: Co
         catch (_: Exception) { close(); ColorPreviewSource() }
     }
     rememberEditBitmap(rendered.image)?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
-}
-
-@Composable
-private fun EditorSlider(
-    label: String, value: Float, range: ClosedFloatingPointRange<Float>, display: String,
-    onReset: (() -> Unit)?, onInfo: (() -> Unit)? = null, onChange: (Float) -> Unit
-) {
-    Column(Modifier.padding(horizontal = 20.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(label, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelLarge)
-            if (onInfo != null) IconButton(onClick = onInfo, modifier = Modifier.size(28.dp)) { BridgeIcon(BridgeGlyph.INFO, "曝光参考说明") }
-            Text(display, style = MaterialTheme.typography.labelLarge)
-            if (onReset != null) TextButton(onClick = onReset) { Text("复位") }
-        }
-        Slider(value = value, onValueChange = onChange, valueRange = range)
-    }
 }

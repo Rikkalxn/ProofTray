@@ -9,5 +9,7 @@ internal object NativeColor {
     external fun values(handle: Long, metadata: Boolean): FloatArray
     external fun pack(handle: Long): ByteArray
     external fun release(handle: Long)
-    external fun apply(handle: Long, bitmap: Bitmap, settings: FloatArray, premultiplied: Boolean, inputEncoding: Int, outputEncoding: Int)
+    external fun apply(handle: Long, bitmap: Bitmap, settings: FloatArray, edits: FloatArray,
+        premultiplied: Boolean, inputEncoding: Int, outputEncoding: Int)
+    external fun bake(handle: Long, settings: FloatArray, edits: FloatArray, inputEncoding: Int, outputEncoding: Int): FloatArray
 }

@@ -2,6 +2,7 @@
 #include <jni.h>
 
 #include "jni_support.h"
+#include "color_look_jni.h"
 #include <libraw/libraw.h>
 
 #include <algorithm>
@@ -18,6 +19,7 @@
 #include "linear_raw.h"
 #include "raw_file_stream.h"
 #include "openbridge/log_encoding.h"
+#include "openbridge/log_tiff.h"
 #include "openbridge/raw_exposure.h"
 
 namespace {
@@ -89,20 +91,16 @@ jobject WithSignal(JNIEnv* env, jobject signal, Work work) {
 }
 
 template <typename ReadPixel>
-jobject RenderLinear(JNIEnv* env, int width, int height, float baseline_exposure, jbyteArray packed, jfloatArray settings,
+jobject RenderLinear(JNIEnv* env, int width, int height, float baseline_exposure, jbyteArray packed, jfloatArray settings, jfloatArray edits,
                      jfloat gain_ev, jint encoding, jint output_encoding, jboolean video, Cancellation& cancel, ReadPixel read) {
-  if (!settings || env->GetArrayLength(settings) != 5 || !std::isfinite(gain_ev) || std::abs(gain_ev) > 3) {
+  if (!std::isfinite(gain_ev) || std::abs(gain_ev) > 3) {
     throw std::invalid_argument("Invalid RAW rendering parameters");
   }
   const openbridge::RawRenderSettings render_settings{baseline_exposure};
-  std::array<float, 5> v{};
-  env->GetFloatArrayRegion(settings, 0, 5, v.data());
-  if (env->ExceptionCheck()) return nullptr;
+  const auto look = openbridge::jni::ReadColorLook(env, settings, edits, encoding, output_encoding);
   std::optional<openbridge::ColorLut> lut;
   if (packed) lut.emplace(openbridge::ParseLutBinary(openbridge::jni::ReadBytes(env, packed, 16 * 1024 * 1024, "Invalid RAW LUT payload")));
   const auto range = video ? openbridge::LogRange::Video10 : openbridge::LogRange::Full10;
-  const openbridge::ColorLook look{v[0], v[1], v[2], v[3], v[4], static_cast<openbridge::LutEncoding>(encoding),
-                                   static_cast<openbridge::LutEncoding>(output_encoding)};
   const bool scene = look.input_encoding != openbridge::LutEncoding::Direct && look.input_encoding != openbridge::LutEncoding::Rec709Gamma24;
   std::optional<openbridge::LogGrade> log_grade;
   std::optional<openbridge::RawDisplayGrade> display_grade;
@@ -224,14 +222,14 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_org_openbridge_app_data_RawPreviewE
 }
 
 extern "C" JNIEXPORT jobject JNICALL Java_org_openbridge_app_data_RawPhotoDecoder_renderPreviewNative(
-    JNIEnv* env, jobject, jobject buffer, jint w, jint h, jfloat baseline_exposure, jbyteArray lut, jfloatArray params, jfloat gain_ev,
-    jint encoding, jint output_encoding, jboolean video, jobject signal) {
+    JNIEnv* env, jobject, jobject buffer, jint w, jint h, jfloat baseline_exposure, jbyteArray lut, jfloatArray params, jfloatArray edits,
+    jfloat gain_ev, jint encoding, jint output_encoding, jboolean video, jobject signal) {
   return WithSignal(env, signal, [&](Cancellation& cancel) {
     auto* src = static_cast<const uint8_t*>(env->GetDirectBufferAddress(buffer));
     if (w <= 0 || h <= 0 || w > 1600 || h > 1600 || !src || env->GetDirectBufferCapacity(buffer) != int64_t{w} * h * sizeof(Rgb)) {
       throw std::invalid_argument("Invalid linear preview buffer");
     }
-    return RenderLinear(env, w, h, baseline_exposure, lut, params, gain_ev, encoding, output_encoding, video, cancel, [&](int x, int y) {
+    return RenderLinear(env, w, h, baseline_exposure, lut, params, edits, gain_ev, encoding, output_encoding, video, cancel, [&](int x, int y) {
       Rgb rgb;
       std::memcpy(rgb.data(), src + (size_t(y) * w + x) * sizeof(Rgb), sizeof(Rgb));
       return rgb;
@@ -240,12 +238,28 @@ extern "C" JNIEXPORT jobject JNICALL Java_org_openbridge_app_data_RawPhotoDecode
 }
 
 extern "C" JNIEXPORT jobject JNICALL Java_org_openbridge_app_data_RawPhotoDecoder_decodeNative(
-    JNIEnv* env, jobject, jint fd, jint edge, jlong memory_budget, jbyteArray lut, jfloatArray params, jfloat gain_ev,
+    JNIEnv* env, jobject, jint fd, jint edge, jlong memory_budget, jbyteArray lut, jfloatArray params, jfloatArray edits, jfloat gain_ev,
     jint encoding, jint output_encoding, jboolean video, jobject signal) {
   return WithSignal(env, signal, [&](Cancellation& cancel) {
     if (memory_budget <= 0) throw std::invalid_argument("Invalid RAW memory budget");
     auto raw = ReadLinear(fd, edge, 100000000, openbridge::RawDecodeSize::Full, cancel, memory_budget);
-    return RenderLinear(env, raw->width, raw->height, raw->displayBaselineExposure(), lut, params, gain_ev, encoding, output_encoding, video, cancel,
-                        [&](int x, int y) { return raw->pixel(x, y); });
+    return RenderLinear(env, raw->width, raw->height, raw->displayBaselineExposure(), lut, params, edits, gain_ev,
+                        encoding, output_encoding, video, cancel, [&](int x, int y) { return raw->pixel(x, y); });
   });
+}
+
+extern "C" JNIEXPORT jintArray JNICALL Java_org_openbridge_app_data_RawPhotoDecoder_writeLogNative(
+    JNIEnv* env, jobject, jint fd, jint output_fd, jint edge, jlong memory_budget, jint encoding,
+    jfloat exposure, jfloat warmth, jfloat gain_ev, jfloat tint, jobject signal) {
+  return static_cast<jintArray>(WithSignal(env, signal, [&](Cancellation& cancel) -> jobject {
+    if (fd < 0 || output_fd < 0 || fd == output_fd || memory_budget <= 0) throw std::invalid_argument("Invalid Log export descriptor or budget");
+    auto raw = ReadLinear(fd, edge, 100000000, openbridge::RawDecodeSize::Full, cancel, memory_budget);
+    openbridge::WriteLogTiff(output_fd, raw->width, raw->height,
+        {static_cast<openbridge::LutEncoding>(encoding), exposure, warmth, gain_ev, tint},
+        [&](int x, int y) { return raw->pixel(x, y); }, [&] { return cancel.Requested(); });
+    const jint dimensions[]{raw->width, raw->height};
+    auto result = env->NewIntArray(2);
+    if (result) env->SetIntArrayRegion(result, 0, 2, dimensions);
+    return result;
+  }));
 }

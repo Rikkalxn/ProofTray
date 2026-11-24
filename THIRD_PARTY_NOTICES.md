@@ -25,6 +25,16 @@ LibRaw is a separate shared library. Initialize submodules to obtain the full pi
 ProofTray's JNI adapter and CMake configuration. Source distributions must include the submodule contents.
 Rebuild/replacement instructions and optional codec exclusions are in `third_party/libraw/README.md`.
 
+## libtiff
+
+16-bit Log TIFF export uses [libtiff 4.7.2](https://gitlab.com/libtiff/libtiff/-/tree/v4.7.2),
+commit `d01a94be176f5f6a87f7ee1c0b32e65416aa2b4d`, under the upstream libtiff license.
+Copyright 1988-1997 Sam Leffler; Copyright 1991-1997 Silicon Graphics, Inc., and the contributors identified in source headers.
+The unmodified source is pinned in `third_party/libtiff/upstream`. Its full license is retained in `upstream/LICENSE.md`
+and packaged as `app/src/main/assets/licenses/libtiff-LICENSE.md`.
+The library is statically linked into the RAW JNI library with zlib/Deflate enabled and other optional codecs disabled.
+Android uses the platform zlib. Source distributions must include the pinned submodule and the parent CMake adapter.
+
 ## Adobe DNG SDK reference rendering
 
 The default RAW SDR presentation adapts the exposure/shadows ramp, negative-exposure tone adjustment,

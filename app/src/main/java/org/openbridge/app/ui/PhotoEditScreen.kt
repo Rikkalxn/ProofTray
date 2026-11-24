@@ -84,7 +84,7 @@ internal fun PhotoEditScreen(
     LaunchedEffect(state.luts, state.removedLuts, allowLog) {
         if ((!allowLog && draftLook.usesLog) ||
             (draftLook.lutId != null && (state.luts + state.removedLuts).none { it.id == draftLook.lutId })) {
-            draftLook = ColorLookSettings(); draftLookKey = null
+            session.changeLook(draftLook.withoutLut()); draftLookKey = null
         }
     }
     LaunchedEffect(state.colorImportRevision) {
@@ -92,26 +92,29 @@ internal fun PhotoEditScreen(
             val imported = state.luts.firstOrNull { it.look().lutKey == state.importedLookKey }?.look()
                 ?: state.colorPresets.firstOrNull { "preset:${it.id}" == state.importedLookKey }?.look
             if (imported != null && imported.usage.unavailableReason == null && (allowLog || !imported.usesLog)) {
-                draftLook = imported; draftLookKey = state.importedLookKey
+                session.changeLook(if (state.importedLookKey?.startsWith("lut:") == true) draftLook.withLut(imported) else imported)
+                draftLookKey = state.importedLookKey
             }
             awaitingImport = null
         }
     }
     fun commit() {
+        session.endColorGesture()
         editor?.endGesture()
         val committed = photoEditSession(draftLook, draftFrame)
         actions.onSetLook(committed.look ?: ColorLookSettings())
         actions.onSetFrame(committed.frame)
     }
     fun close() { if (session.requestClose()) onDismiss() }
-    fun switchTo(value: PhotoEditTab) { editor?.endGesture(); tab = value; ready = false }
+    fun switchTo(value: PhotoEditTab) { session.endColorGesture(); editor?.endGesture(); tab = value; ready = false }
     val sources = rememberPhotoEditSource(asset, reload)
     val graded = key(asset.uri, reload) { rememberGradedPhoto(sources, draftLook, tab == PhotoEditTab.FRAME || sources.raw) }
     val holder = rememberSaveableStateHolder()
     val header: PhotoEditHeaderContent = { extra ->
         PhotoEditHeader(asset.name, tab, editor, ready && editor?.busy != true, draftFrame != null,
             onClose = ::close, onTab = ::switchTo,
-            onExport = { editor?.endGesture(); exporting = true }, onResetLook = { draftLook = ColorLookSettings(); draftLookKey = null },
+            onExport = { session.endColorGesture(); editor?.endGesture(); exporting = true },
+            onResetLook = { session.endColorGesture(); session.changeLook(ColorLookSettings()); draftLookKey = null },
             onClearFrame = { editor?.clear(); draftFrame = null }, extraMenu = extra)
     }
     val pager: @Composable BoxScope.() -> Unit = {
@@ -127,11 +130,14 @@ internal fun PhotoEditScreen(
                     key(asset.uri, reload) {
                         holder.SaveableStateProvider(tab) {
                             if (tab == PhotoEditTab.COLOR) ColorEditor(asset, state, actions, draftLook, {
-                                draftLook = it; if (it.isIdentity) draftLookKey = null
+                                session.changeLook(it); if (it.isIdentity) draftLookKey = null
                             }, draftLookKey, { draftLookKey = it }, onImport = {
                                 awaitingImport = state.colorImportRevision; actions.onImportColor()
                             },
                                 photos = sources, graded = graded, allowLog = allowLog,
+                                canUndo = session.canUndoColor, canRedo = session.canRedoColor,
+                                onUndo = session::undoColor, onRedo = session::redoColor,
+                                onGesture = { if (it) session.beginColorGesture() else session.endColorGesture() },
                                 onReady = { ready = it }, onRetry = { reload++; ready = false },
                                 header = header, status = {
                                     EditStatus("边框 · " + (draftFrame?.name ?: "无")) { switchTo(PhotoEditTab.FRAME) }

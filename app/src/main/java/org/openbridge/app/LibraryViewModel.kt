@@ -26,6 +26,7 @@ import org.openbridge.app.data.PhotoRepository
 import org.openbridge.app.domain.CatalogResult
 import org.openbridge.app.domain.ExportOptions
 import org.openbridge.app.domain.ExportPreferences
+import org.openbridge.app.domain.validateLogExport
 import org.openbridge.app.domain.ExportStatus
 import org.openbridge.app.domain.FilterSpec
 import org.openbridge.app.domain.PhotoAsset
@@ -396,6 +397,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
             return false
         }
         try {
+            options.validateLogExport(assets)
             options.look?.validateForExport(assets)
             options.frame?.let {
                 require(options.format != org.openbridge.app.domain.ExportFormat.ORIGINAL) { "原件复制不应用边框，请选择 JPEG 或 PNG" }
@@ -431,7 +433,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
 
     private suspend fun enqueueExport(request: PendingExport, destination: String) {
         exporter.enqueue(request.assets, request.options, destination)
-        preferences.update { it.copy(exportPreferences = ExportPreferences.fromOptions(request.options)) }
+        preferences.update { it.copy(exportPreferences = ExportPreferences.fromOptions(request.options, it.exportPreferences)) }
     }
 
     fun cancelTask(id: String) = exporter.cancel(id)

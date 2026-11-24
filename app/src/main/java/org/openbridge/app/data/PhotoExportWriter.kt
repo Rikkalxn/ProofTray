@@ -15,6 +15,7 @@ import org.openbridge.app.domain.ExportTask
 import org.openbridge.app.domain.ColorLookSettings
 import org.openbridge.app.domain.MediaFormat
 import org.openbridge.app.domain.supportsRendering
+import org.openbridge.app.domain.validateLogExport
 import org.openbridge.app.frame.FrameCodec
 import org.openbridge.app.frame.FrameMemoryBudget
 import org.openbridge.app.frame.FrameRenderSession
@@ -28,6 +29,8 @@ internal class PhotoExportWriter(context: Context) {
     private val colors = LutRepository.get(appContext)
 
     fun validate(task: ExportTask) {
+        task.options.validateLogExport(listOf(task.asset))
+        if (task.options.log != null) return
         val look = task.options.look
         look?.validateForExport(listOf(task.asset))
         task.options.frame?.let { frame ->
@@ -78,7 +81,48 @@ internal class PhotoExportWriter(context: Context) {
         if (task.asset.sizeBytes > 0) require(copied == task.asset.sizeBytes) { "源文件大小已变化，请重新导入后导出" }
     }
 
+    suspend fun convertLog(task: ExportTask, output: Uri, work: ExportProgress): String {
+        task.options.validateLogExport(listOf(task.asset))
+        val settings = checkNotNull(task.options.log)
+        work.ensureActive()
+        work.phase = "RAW 显影与 Log 编码"
+        work.report(null, "正在生成 16 位 Log 中间文件")
+        val rendered = RawPhotoDecoder.exportLog(appContext, task.asset, task.options.maxEdge, settings)
+        try {
+            work.ensureActive()
+            work.phase = "写入 Log TIFF"
+            val size = rendered.file.length()
+            var copied = 0L
+            var lastUpdate = 0L
+            rendered.file.inputStream().use { input ->
+                resolver.openOutputStream(output, "w")?.use { destination ->
+                    val buffer = ByteArray(256 * 1024)
+                    while (true) {
+                        work.ensureActive()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        destination.write(buffer, 0, count)
+                        copied += count
+                        val now = System.nanoTime()
+                        if (now - lastUpdate >= 100_000_000L) {
+                            work.report((copied.toDouble() / size).toFloat().coerceIn(0f, 0.99f), "正在保存 Log TIFF")
+                            lastUpdate = now
+                        }
+                    }
+                    work.ensureActive()
+                    destination.flush()
+                } ?: error("无法打开目标文件")
+            }
+            check(copied == size && size > 0) { "Log 文件复制不完整" }
+            // Do not call preserveExif(): its sRGB tag would mislabel these scene Log code values.
+            return "已导出 ${rendered.width} × ${rendered.height}，16 位 Log TIFF · ${checkNotNull(settings.encoding).label} · 全范围"
+        } finally {
+            rendered.file.delete()
+        }
+    }
+
     suspend fun convertRaster(task: ExportTask, output: Uri, work: ExportProgress): String {
+        require(task.options.format in setOf(ExportFormat.JPEG, ExportFormat.PNG) && task.options.log == null) { "请选择成片导出格式" }
         work.ensureActive()
         val frame = task.options.frame
         if (frame != null && task.asset.width != null && task.asset.height != null) {

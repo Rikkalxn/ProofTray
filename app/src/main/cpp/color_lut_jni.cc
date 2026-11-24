@@ -2,6 +2,7 @@
 #include <jni.h>
 
 #include "jni_support.h"
+#include "color_look_jni.h"
 
 #include <atomic>
 #include <memory>
@@ -103,16 +104,23 @@ extern "C" JNIEXPORT void JNICALL Java_org_openbridge_app_color_NativeColor_rele
 }
 
 extern "C" JNIEXPORT void JNICALL Java_org_openbridge_app_color_NativeColor_apply(
-    JNIEnv* env, jobject, jlong id, jobject bitmap, jfloatArray settings, jboolean premultiplied, jint input, jint output) {
+    JNIEnv* env, jobject, jlong id, jobject bitmap, jfloatArray settings, jfloatArray edits, jboolean premultiplied, jint input, jint output) {
   try {
-    if (!settings || env->GetArrayLength(settings) != 5) throw std::invalid_argument("Invalid look parameters");
-    std::array<float, 5> values{};
-    env->GetFloatArrayRegion(settings, 0, 5, values.data());
-    openbridge::ColorLook look{values[0], values[1], values[2], values[3], values[4]};
-    look.input_encoding = static_cast<openbridge::LutEncoding>(input);
-    look.output_encoding = static_cast<openbridge::LutEncoding>(output);
+    const auto look = openbridge::jni::ReadColorLook(env, settings, edits, input, output);
     const auto lut = Get(id);
     BitmapPixels pixels(env, bitmap);
     openbridge::ApplyColorLookRgba(pixels.bytes(), pixels.info.width, pixels.info.height, pixels.info.stride, premultiplied, look, lut.get());
   } catch (const std::exception& error) { ThrowArgument(env, error.what()); }
+}
+
+extern "C" JNIEXPORT jfloatArray JNICALL Java_org_openbridge_app_color_NativeColor_bake(
+    JNIEnv* env, jobject, jlong id, jfloatArray settings, jfloatArray edits, jint input, jint output) {
+  try {
+    const auto look = openbridge::jni::ReadColorLook(env, settings, edits, input, output);
+    const auto source = Get(id);
+    const auto table = openbridge::BakeColorLook(look, source.get());
+    auto result = env->NewFloatArray(static_cast<jsize>(table.values.size()));
+    if (result) env->SetFloatArrayRegion(result, 0, static_cast<jsize>(table.values.size()), table.values.data());
+    return result;
+  } catch (const std::exception& error) { ThrowArgument(env, error.what()); return nullptr; }
 }
