@@ -10,6 +10,9 @@ Get `ProofTray-<version>-release.apk` from [Releases](../../releases/latest).
 
 Requires Android 10 or later. Installing over an older version keeps your library, ratings and paired cameras.
 
+Starting with 0.10.1, the application ID is `org.prooftray.app`. Version 0.10.0 and earlier cannot be updated in place.
+Install the new version and pair your cameras again. The existing library and ratings are not migrated.
+
 ## Features
 
 - Nikon and Sony pairing, memory card browsing, selective original downloads
@@ -63,14 +66,13 @@ C++ core and Log TIFF tests.
 | `third_party/` | LibRaw, libtiff, furble. [Dependency management](third_party/README.md) |
 | `licenses/` | Third-party license texts |
 
-The source package is `org.prooftray.app`. The application ID stays `org.openbridge.app` for in-place updates.
-`core/` can be opened in CLion as a standalone project.
+Both the source package and the application ID are `org.prooftray.app`. `core/` can be opened in CLion as a standalone project.
 
 ## Releasing
 
 1. Under **Settings → Secrets and variables → Actions**, add:
-   - `ANDROID_KEYSTORE_BASE64`: the release keystore, Base64-encoded
-   - `ANDROID_KEYSTORE_PASSWORD`: the keystore password
+   - `ANDROID_KEYSTORE_BASE64`: the release keystore, Base64-encoded, with the key alias `prooftray`
+   - `ANDROID_KEYSTORE_PASSWORD`: the keystore password, also used as the key password
 2. Run **Actions → Release → Run workflow** on the default branch.
 
 The workflow bumps the patch version and `versionCode` by one, signs the APK, pushes the `v<version>` tag and publishes the APK

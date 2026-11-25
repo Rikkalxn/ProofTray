@@ -31,7 +31,7 @@ android {
 
     defaultConfig {
         // Installed identity owns the photo database, URI grants and camera pairing preferences.
-        applicationId = "org.openbridge.app"
+        applicationId = "org.prooftray.app"
         minSdk = 29
         targetSdk = 36
         versionCode = appVersion.getProperty("versionCode").toInt()

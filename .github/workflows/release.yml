@@ -55,7 +55,7 @@ jobs:
         run: |
           apk_dir=app/build/outputs/apk/release
           filename=$(jq -er --arg version "$VERSION" --argjson code "$VERSION_CODE" '
-            select(.applicationId == "org.openbridge.app" and (.elements | length) == 1)
+            select(.applicationId == "org.prooftray.app" and (.elements | length) == 1)
             | .elements[0] | select(.versionName == $version and .versionCode == $code) | .outputFile
           ' "$apk_dir/output-metadata.json")
           out="$RUNNER_TEMP/prooftray-release"
@@ -67,7 +67,7 @@ jobs:
           unset KEYSTORE_BASE64
           zipalign -P 16 -f 4 "$apk_dir/$filename" "$RUNNER_TEMP/prooftray-aligned.apk"
           apk="$out/ProofTray-$VERSION-release.apk"
-          apksigner sign --ks "$key" --ks-key-alias openbridge --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEYSTORE_PASSWORD \
+          apksigner sign --ks "$key" --ks-key-alias prooftray --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEYSTORE_PASSWORD \
             --v4-signing-enabled false --out "$apk" "$RUNNER_TEMP/prooftray-aligned.apk"
           apksigner verify "$apk"
 

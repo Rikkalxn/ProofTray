@@ -32,14 +32,11 @@
         </provider>
         <service android:name="org.prooftray.app.camera.CameraService" android:exported="false" android:foregroundServiceType="connectedDevice" />
         <service android:name="org.prooftray.app.camera.CameraLocationService" android:exported="false" android:foregroundServiceType="location" />
-        <activity android:name="org.prooftray.app.MainActivity" android:exported="true" />
-        <!-- Keep existing home-screen shortcuts and explicit launch intents working across the source-package rename. -->
-        <activity-alias android:name="org.openbridge.app.MainActivity" android:targetActivity="org.prooftray.app.MainActivity"
-            android:exported="true">
+        <activity android:name="org.prooftray.app.MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity-alias>
+        </activity>
     </application>
 </manifest>
