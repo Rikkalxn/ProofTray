@@ -1,0 +1,18 @@
+name: Set up Android build tools
+description: Install the JDK, Gradle integration and Android SDK packages used by ProofTray.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
+
+    - shell: bash
+      run: |
+        build_tools=36.0.0
+        "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-36" \
+          "build-tools;$build_tools" "ndk;28.2.13676358" "cmake;3.22.1"
+        echo "$ANDROID_HOME/build-tools/$build_tools" >> "$GITHUB_PATH"
