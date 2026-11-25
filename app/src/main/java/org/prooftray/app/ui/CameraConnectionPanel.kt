@@ -26,7 +26,7 @@ import androidx.compose.ui.window.DialogProperties
 internal fun CameraStatusCard(state: LibraryUiState, actions: LibraryActions, onOpen: (CameraPanel?) -> Unit) {
     val summary = cameraConnectionSummary(state)
     val camera = state.camera
-    val name = (if (camera.connected) camera.cameraName else state.settings.selectedName).ifBlank { "相机" }
+    val name = state.connectionCameraName.ifBlank { "相机" }
     val primary = cameraPrimaryAction(state, summary)
     Surface(onClick = { onOpen(null) }, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
         shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainer) {

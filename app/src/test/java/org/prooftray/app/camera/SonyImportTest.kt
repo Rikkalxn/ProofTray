@@ -34,13 +34,51 @@ class SonyImportTest {
 
     @Test fun bluetoothAcknowledgementAndHotspotReadinessAreSeparate() {
         assertNull(SonyControlData.pairResult(byteArrayOf(7, 0, 0, 1, 0, 0, 0, 1)))
-        assertEquals(false, SonyControlData.pairResult(byteArrayOf(7, 0, 0, 2, 0, 0, 0, 6)))
-        assertEquals(true, SonyControlData.pairResult(byteArrayOf(7, 0, 0, 2, 0, 0, 0, 1)))
+        assertNull(requireNotNull(SonyControlData.pairResult(byteArrayOf(7, 0, 0, 2, 0, 0, 0, 1))).failure)
+        fun failure(type: Int, code: Int) = requireNotNull(SonyControlData.pairResult(byteArrayOf(7, 0, 0, type.toByte(), 0, 0, 0, code.toByte())))
+        assertTrue(failure(2, 6).failure.orEmpty().contains("已取消"))
+        assertTrue(failure(1, 7).failure.orEmpty().contains("经典蓝牙"))
+        assertTrue(failure(2, 7).failure.orEmpty().contains("尚未准备好"))
+        assertTrue(failure(2, 9).diagnostic.contains("EE03"))
+        assertTrue(failure(2, 42).failure.orEmpty().contains("42"))
         assertFalse(requireNotNull(SonyControlData.wifiStatus(byteArrayOf(4, 0, 1, 1, 1))).ready)
         assertTrue(requireNotNull(SonyControlData.wifiStatus(byteArrayOf(3, 0, 8, 1, 4, 0, 1, 2, 0))).ready)
         assertNull(SonyControlData.wifiStatus(byteArrayOf(4, 0, 1, 2)))
         assertTrue(requireNotNull(SonyControlData.wifiStatus(byteArrayOf(4, 0, 1, 0, 5))).terminated)
         assertFalse(requireNotNull(SonyControlData.wifiStatus(byteArrayOf(4, 0, 1, 3, 0))).terminated)
+    }
+
+    @Test fun newSonyCameraMustAdvertiseBothPairingFlags() {
+        val header = byteArrayOf(3, 0, 0, 0, 'U'.code.toByte(), '1'.code.toByte(), 0x21, 0, 0)
+        fun payload(flags: Int) = header + byteArrayOf(0x22, flags.toByte(), 0)
+        assertTrue(SonyControlData.advertisesPairing(payload(0xc0), false))
+        assertFalse(SonyControlData.advertisesPairing(payload(0x80), true))
+        assertFalse(SonyControlData.advertisesPairing(payload(0x40), false))
+        assertFalse(SonyControlData.advertisesPairing(header + 0x22.toByte(), false))
+        assertTrue(SonyControlData.advertisesPairing(null, true))
+    }
+
+    @Test fun sonyControlCapabilitiesDistinguishAccessAuthenticationFromLanDiscovery() {
+        val functions = SonyControlData.supportedFunctions(byteArrayOf(6, 0, 8, 1, 0, 10, 0))
+        assertTrue(SonyControlData.SSH_INFO in functions)
+        assertFalse(SonyControlData.ACCESS_POINT in functions)
+        assertEquals(setOf(8), SonyControlData.supportedFunctions(byteArrayOf(6, 0, 8, 1, 0, 10)))
+        assertEquals(setOf(8), SonyControlData.supportedFunctions(byteArrayOf(6, 0, 8, 1, 0, 10, 2)))
+        assertThrows(IllegalArgumentException::class.java) { SonyControlData.supportedFunctions(byteArrayOf(2, 0, 8)) }
+    }
+
+    @Test fun sonyPairingRecoveryRequiresEvidenceFromThisBond() {
+        assertTrue(usesSonySystemPairing(36, "OnePlus"))
+        assertTrue(usesSonySystemPairing(37, "Google"))
+        assertFalse(usesSonySystemPairing(36, "Xiaomi"))
+        val rejected = sonyGattFailure("写入配对请求（EE01）", 157)
+        assertTrue(rejected.diagnostic.contains("157（0x9D）"))
+        assertTrue(rejected.attributeRejected)
+        assertFalse(sonyGattFailure("读取机身信息", 133).attributeRejected)
+        assertTrue(canReconnectSonyPairing(157, confirmed = false, newBond = true))
+        assertFalse(canReconnectSonyPairing(157, confirmed = false, newBond = false))
+        assertFalse(canReconnectSonyPairing(null, confirmed = false, newBond = true))
+        assertTrue(canReconnectSonyPairing(0x12, confirmed = true, newBond = false))
     }
 
     @Test fun hotspotWireStatesAreIndependentOfErrorCodes() {

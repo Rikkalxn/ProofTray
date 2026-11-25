@@ -63,7 +63,7 @@ class SonyHotspotStatusTest {
     @Test fun stoppedWithoutErrorKeepsWaitingAndLaunchedIgnoresError() {
         for (error in listOf(0, 1, 5, 9)) {
             val status = SonyHotspotStatus()
-            assertTrue(status.beginStart())
+            assertFalse(status.beginStart())
             status.notified(SonyControlData.WifiStatus(0, 0))
             status.checkFailure()
             assertFalse(checkNotNull(status.latest()).ready)

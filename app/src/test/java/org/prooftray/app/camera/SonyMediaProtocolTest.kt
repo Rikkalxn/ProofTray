@@ -10,6 +10,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SonyMediaProtocolTest {
+    @Test fun sessionOpeningUsesTheMediaServerCapabilityAndTheServerVersion() {
+        val xml = "<root><X_ServerVersion>3.0</X_ServerVersion><X_PTP_MediaServerSupport>Disable</X_PTP_MediaServerSupport></root>"
+        val disabled = sonyDescription(xml.toByteArray())
+        assertFalse(disabled.usesSdioOpen(setOf(0x9210)))
+        assertTrue(sonyDescription(xml.replace("Disable", "Enable").toByteArray()).usesSdioOpen(emptySet()))
+        assertTrue(sonyDescription(xml.replace("3.0", "4.0").toByteArray()).usesSdioOpen(emptySet()))
+        assertTrue(sonyDescription(byteArrayOf()).usesSdioOpen(setOf(0x9210)))
+    }
+
     private fun scalar(type: Int, enabled: Int, current: ByteArray): SonyScalar {
         val bytes = ByteBuffer.allocate(6 + current.size * 2).order(ByteOrder.LITTLE_ENDIAN)
             .putShort(0xd1d4.toShort()).putShort(type.toShort()).put(0).put(enabled.toByte())

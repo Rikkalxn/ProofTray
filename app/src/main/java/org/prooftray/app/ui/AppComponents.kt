@@ -7,11 +7,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.ScrollState
@@ -39,6 +43,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -237,9 +242,11 @@ fun AppSheet(
     scrollState: ScrollState? = null, scrollable: Boolean = true,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val topInset = WindowInsets.safeDrawing.only(WindowInsetsSides.Top)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
-        Column(Modifier.fillMaxWidth().then(if (compact) Modifier else Modifier.fillMaxHeight(0.9f)).imePadding()) {
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        contentWindowInsets = { WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom) }) {
+        Column(Modifier.fillMaxWidth().belowInset(topInset).then(if (compact) Modifier else Modifier.fillMaxHeight(0.9f)).imePadding()) {
             Text(title, Modifier.padding(horizontal = 24.dp, vertical = 8.dp), style = MaterialTheme.typography.headlineSmall)
             Column(Modifier.weight(1f, fill = !compact)
                 .then(if (scrollable) Modifier.verticalScroll(scrollState ?: rememberScrollState()) else Modifier)
@@ -249,4 +256,11 @@ fun AppSheet(
                 horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically, content = actions)
         }
     }
+}
+
+private fun Modifier.belowInset(insets: WindowInsets) = layout { measurable, constraints ->
+    val maxHeight = if (constraints.hasBoundedHeight) (constraints.maxHeight - insets.getTop(this)).coerceAtLeast(constraints.minHeight)
+        else constraints.maxHeight
+    val placeable = measurable.measure(constraints.copy(maxHeight = maxHeight))
+    layout(placeable.width, placeable.height) { placeable.place(0, 0) }
 }

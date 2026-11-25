@@ -1,5 +1,18 @@
 package org.prooftray.app.camera
 
+internal fun bluetoothScanFailure(code: Int): String {
+    val reason = when (code) {
+        1 -> "已有相同的扫描在运行"
+        2 -> "Android 未能登记蓝牙扫描"
+        3 -> "Android 蓝牙服务内部错误"
+        4 -> "手机不支持本次蓝牙扫描方式"
+        5 -> "手机蓝牙扫描资源不足"
+        6 -> "扫描请求过于频繁，请稍后重试"
+        else -> "手机未能完成蓝牙扫描"
+    }
+    return "$reason（Android 扫描码 $code）"
+}
+
 // Android removes the company ID; an LSS payload contains four client-ID bytes and one advertisement flag byte.
 internal fun advertisementFlags(payloads: List<ByteArray>): Int? {
     val candidates = payloads.filter { it.size == 5 }.map { it[4].toInt() and 255 }.distinct()

@@ -3,9 +3,11 @@ package org.prooftray.app.ui
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.prooftray.app.camera.AutoDownloadState
+import org.prooftray.app.camera.BleCamera
 import org.prooftray.app.camera.BleState
 import org.prooftray.app.camera.CameraMake
 import org.prooftray.app.camera.ConnectionPhase
+import org.prooftray.app.camera.disconnected
 import org.prooftray.app.domain.AppSettings
 
 class CameraPrimaryActionTest {
@@ -52,5 +54,18 @@ class CameraPrimaryActionTest {
             val disconnected = state.copy(camera = state.camera.copy(manuallyDisconnected = true))
             assertEquals(CameraAction.WAKE_WIFI, cameraPrimaryAction(disconnected).action)
         }
+    }
+
+    @Test fun firstSonyPairingFailureRetainsItsTargetAndRetryAction() {
+        val target = BleCamera("new", "ILCE-7RM5", make = CameraMake.SONY)
+        val failed = nikon.copy(camera = nikon.camera.copy(pairingTarget = target, connectionPhase = ConnectionPhase.FAILED))
+        assertEquals(target.name, failed.connectionCameraName)
+        assertEquals("索尼蓝牙配对未完成", cameraConnectionSummary(failed).title)
+        assertEquals(CameraAction.RETRY, cameraPrimaryAction(failed).action)
+        assertEquals("重试配对", cameraPrimaryAction(failed).label)
+        assertEquals(CameraAction.WAKE_WIFI, cameraPrimaryAction(failed.copy(camera = failed.camera.disconnected(2))).action)
+        val nikonTarget = sony.copy(camera = failed.camera.copy(pairingTarget = BleCamera("new-nikon", "Z 6II")))
+        assertEquals("尼康蓝牙配对未完成", cameraConnectionSummary(nikonTarget).title)
+        assertEquals(CameraAction.RETRY, cameraPrimaryAction(nikonTarget).action)
     }
 }

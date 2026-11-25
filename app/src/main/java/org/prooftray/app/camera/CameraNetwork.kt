@@ -97,7 +97,8 @@ internal class CameraNetwork(context: Context, private val scope: CoroutineScope
                     Build.VERSION.SDK_INT >= 30 -> props.dhcpServerAddress
                     else -> matchingDhcpServer(props)
                 }
-                val gateway = props.routes.firstOrNull { it.isDefaultRoute && it.gateway is Inet4Address }?.gateway
+                val routes = props.routes.filter { it.hasGateway() && it.gateway is Inet4Address }
+                val gateway = routes.firstOrNull { it.isDefaultRoute }?.gateway ?: routes.mapNotNull { it.gateway }.distinct().singleOrNull()
                 listOfNotNull(dhcp, gateway).firstOrNull { !it.isAnyLocalAddress && !it.isLoopbackAddress && !it.isMulticastAddress }
                     ?.hostAddress?.let { return it }
             }

@@ -12,7 +12,8 @@ internal fun CameraState.disconnected(nextGeneration: Int, reason: String? = nul
     connectionPhase = if (reason == null) ConnectionPhase.IDLE else ConnectionPhase.FAILED,
     stage = if (reason == null) "相机未连接" else "连接已断开", message = reason, pairingCode = null,
     sourceId = "", hasMore = false, catalogIds = emptySet(), catalogError = null, catalogStopped = false,
-    catalogDates = emptyList(), catalogStartDay = null, make = CameraMake.OTHER
+    catalogDates = emptyList(), catalogStartDay = null, make = CameraMake.OTHER, pairingTarget = null,
+    protocolDiagnostic = if (reason == null) null else protocolDiagnostic
 )
 
 internal fun CameraState.withCatalogProgress(progress: BrowseProgress): CameraState {

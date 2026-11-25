@@ -6,12 +6,25 @@ import org.prooftray.app.domain.AutoDownloadKind
 
 internal data class CameraConnectionSummary(val title: String, val detail: String, val busy: Boolean, val bluetoothReady: Boolean)
 
+internal val LibraryUiState.connectionCameraName: String get() = camera.pairingTarget?.name ?:
+    if (camera.connected) camera.cameraName else settings.selectedName
+
+internal val LibraryUiState.hasSelectedNikon: Boolean get() = camera.pairingTarget == null && settings.selectedAddress.isNotBlank() &&
+    !settings.sonySelected && camera.make != CameraMake.SONY
+
 internal fun cameraConnectionSummary(state: LibraryUiState): CameraConnectionSummary {
     val camera = state.camera
     val ble = state.ble
     val ready = !state.settings.sonySelected && ble.authenticated && ble.systemPaired && !ble.pairingInProgress
     return when {
         camera.connectionPhase == ConnectionPhase.DISCONNECTING -> CameraConnectionSummary("正在断开相机", "", true, false)
+        camera.pairingTarget != null -> {
+            val sony = camera.pairingTarget.make == CameraMake.SONY
+            val brand = if (sony) "索尼" else "尼康"
+            if (camera.connecting) CameraConnectionSummary("正在配对${brand}相机", if (sony || !ble.pairingInProgress) camera.stage else ble.message,
+                true, false)
+            else CameraConnectionSummary("${brand}蓝牙配对未完成", camera.message.orEmpty(), false, false)
+        }
         camera.manuallyDisconnected && !camera.connected && !camera.connecting ->
             CameraConnectionSummary("相机已断开", "", false, false)
         camera.connecting -> CameraConnectionSummary("正在连接相机", if (ble.pairingInProgress) ble.message else camera.stage, true, ready)
@@ -44,7 +57,6 @@ internal fun cameraPrimaryAction(
 ): CameraPrimaryAction {
     val camera = state.camera
     val saved = state.settings.selectedAddress.isNotBlank()
-    val nikon = saved && !state.settings.sonySelected && camera.make != CameraMake.SONY
     val failed = camera.connectionPhase == ConnectionPhase.FAILED
     return when {
         camera.connectionPhase == ConnectionPhase.DISCONNECTING -> CameraPrimaryAction(CameraAction.NONE, "正在断开")
@@ -52,7 +64,8 @@ internal fun cameraPrimaryAction(
         camera.connected -> CameraPrimaryAction(CameraAction.BROWSE, "浏览照片", AppGlyph.PHOTOS)
         !saved && camera.manuallyDisconnected -> CameraPrimaryAction(CameraAction.MANUAL, "重新连接 Wi-Fi", AppGlyph.WIFI)
         !state.ble.adapterEnabled -> CameraPrimaryAction(CameraAction.BLUETOOTH_SETTINGS, "打开手机蓝牙", AppGlyph.BLUETOOTH)
-        nikon -> CameraPrimaryAction(CameraAction.WAKE_WIFI, "切换到 Wi-Fi", AppGlyph.WIFI)
+        failed && camera.pairingTarget != null -> CameraPrimaryAction(CameraAction.RETRY, "重试配对", AppGlyph.REFRESH)
+        state.hasSelectedNikon -> CameraPrimaryAction(CameraAction.WAKE_WIFI, "切换到 Wi-Fi", AppGlyph.WIFI)
         failed -> CameraPrimaryAction(CameraAction.RETRY, "重试连接", AppGlyph.REFRESH)
         saved && camera.manuallyDisconnected -> CameraPrimaryAction(CameraAction.WAKE_WIFI, "重新连接相机", AppGlyph.WIFI)
         saved -> CameraPrimaryAction(CameraAction.WAKE_WIFI, "连接相机 Wi-Fi", AppGlyph.WIFI)

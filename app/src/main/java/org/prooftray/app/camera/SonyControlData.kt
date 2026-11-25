@@ -27,8 +27,32 @@ class SonyAccess internal constructor(internal val user: String, internal val pa
 
 internal object SonyControlData {
     const val COMPANY_ID = 0x012d
+    const val SSH_INFO = 8
+    const val ACCESS_POINT = 10
     val controlService: UUID = UUID.fromString("8000cc00-cc00-ffff-ffff-ffffffffffff")
     val pairingService: UUID = UUID.fromString("8000ee00-ee00-ffff-ffff-ffffffffffff")
+
+    /** Android strips the company ID. The six-byte camera header is followed by three-byte function records. */
+    fun advertisesPairing(data: ByteArray?, pairingServicePresent: Boolean): Boolean {
+        if (data == null || data.size < 9 || data[0] != 3.toByte() || data[1] != 0.toByte()) return pairingServicePresent
+        if (data[4] != 'U'.code.toByte() || (data[5] != '0'.code.toByte() && data[5] != '1'.code.toByte())) return false
+        for (offset in 6..data.size - 3 step 3) {
+            if (data[offset] == 0.toByte()) break
+            if (data[offset] == 0x22.toByte()) return data[offset + 1].toInt() and 0xc0 == 0xc0
+        }
+        return pairingServicePresent
+    }
+
+    fun supportedFunctions(data: ByteArray): Set<Int> {
+        require(data.size >= 4) { "机身蓝牙功能列表（CC0D）不完整" }
+        return buildSet {
+            for (offset in 1..data.size - 3 step 3) {
+                val id = ((data[offset].toInt() and 255) shl 8) or (data[offset + 1].toInt() and 255)
+                if (data[offset + 2] == 1.toByte()) add(id)
+            }
+            require(isNotEmpty()) { "机身未报告可用的蓝牙功能（CC0D）" }
+        }
+    }
 
     fun wifiText(value: ByteArray): String {
         require(value.size in 3..67) { "相机热点数据长度异常" }
@@ -82,14 +106,35 @@ internal object SonyControlData {
         return access
     }
 
-    /** Null is an intermediate notification. A final result is distinct from both GATT success and the system bond. */
-    fun pairResult(value: ByteArray): Boolean? {
+    data class PairingReply(val diagnostic: String, val failure: String? = null)
+
+    /** EE03 has distinct state and result code spaces. Ordinary progress does not complete the exchange. */
+    fun pairResult(value: ByteArray): PairingReply? {
         if (value.size < 8 || value[0] != 7.toByte() || value[1] != 0.toByte() || value[2] != 0.toByte()) return null
         val code = ByteBuffer.wrap(value, 4, 4).order(ByteOrder.BIG_ENDIAN).int
-        return when (value[3].toInt()) {
-            2 -> code == 1
-            1 -> if (code in setOf(3, 7, 9)) false else null
-            else -> null
+        if (value[3] == 1.toByte()) {
+            val failure = when (code) {
+                3 -> "机身拒绝了低功耗蓝牙配对。"
+                7 -> "机身拒绝了经典蓝牙配对。"
+                9 -> "本次配对已取消。"
+                else -> return null
+            }
+            return PairingReply("机身配对进度（EE03）· $code", failure)
         }
+        if (value[3] != 2.toByte()) return null
+        val failure = when (code) {
+            1 -> null
+            2 -> "机身拒绝了低功耗蓝牙配对。"
+            3 -> "低功耗蓝牙配对失败，请核对手机和机身的配对状态。"
+            4 -> "机身拒绝了经典蓝牙配对。"
+            5 -> "经典蓝牙配对失败，请查看手机和机身的配对提示。"
+            6 -> "本次配对已取消。"
+            7 -> "机身尚未准备好配对，请打开机身的「智能手机连接」并保持在等待连接画面。"
+            8 -> "机身报告 MFi 认证失败。"
+            9 -> "双方配对校验值不一致，请重新配对并核对两端的确认提示。"
+            10 -> "机身未能登记这台手机，请检查机身的已配对设备列表。"
+            else -> "机身返回了未识别的配对结果（$code）。"
+        }
+        return PairingReply("机身配对结果（EE03）· $code", failure)
     }
 }

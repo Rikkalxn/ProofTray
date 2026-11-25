@@ -13,6 +13,7 @@ import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -22,7 +23,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.prooftray.app.data.AppSettingsRepository
-import org.prooftray.app.domain.AppSettings
 
 /** BLE verifies the camera; BR/EDR pairing is a separate system-confirmed step, followed by reconnecting BLE control. */
 @SuppressLint("MissingPermission")
@@ -44,77 +44,86 @@ internal class BluetoothPairingCoordinator(
         ble.disconnect()
         job = scope.launch {
             var pairedAddress = ""
-            fun persist(change: (AppSettings) -> AppSettings) {
+            fun progress(message: String) {
                 synchronized(this@BluetoothPairingCoordinator) {
                     if (generation != token) throw CancellationException("相机选择已变化")
-                    settings.update(change)
+                    ble.pairingStatus(message, true, pairedAddress.isNotBlank(), pairedAddress)
                 }
-            }
-            fun progress(message: String) {
-                if (generation == token) ble.pairingStatus(message, true, pairedAddress.isNotBlank(), pairedAddress)
                 Log.i("ProofTray.Bluetooth", "pairing: $message")
             }
             try {
                 previous?.join()
                 beforeConnect()
-                var control = if (camera.classic) settings.state.value.controlAddress else camera.address
+                val saved = settings.state.value
+                var control = if (camera.classic) saved.controlAddress else camera.address
                 check(control.isNotBlank()) { "请先搜索并连接相机的 BLE 控制设备" }
                 val knownNames = if (rediscover || camera.classic) savedNames(control) else setOf(camera.name).filter(String::isNotBlank).toSet()
-                val savedClassic = settings.state.value.transferAddress.takeIf(String::isNotBlank)?.let(adapter::getRemoteDevice)
-                if (savedClassic?.bondState == BluetoothDevice.BOND_BONDED && matchesCameraName(savedClassic.name, knownNames)) {
-                    pairedAddress = savedClassic.address
-                }
+                val restoring = rediscover || camera.classic || !allowSystemPairing || saved.controlAddress.equals(control, true)
+                val expectedSerial = cameraSerial(saved.controlSerial).takeIf { restoring }
                 if (rediscover || camera.classic) {
                     progress("正在重新发现相机当前的 BLE 地址")
-                    control = ble.rediscover(knownNames, control).address
+                    control = ble.rediscover(knownNames, control, expectedSerial).address
                 }
-                val verified = connectControl(control, knownNames, ::progress)
+                val registerOnFirstLink = initializePairing && !restoring
+                val verified = connectControl(control, knownNames, ::progress, expectedSerial, registerPhone = registerOnFirstLink)
                 control = verified.connectedAddress
                 currentCoroutineContext().ensureActive()
                 val names = setOf(verified.cameraName, verified.serverName).filter(String::isNotBlank).toMutableSet()
-                val savedName = verified.cameraName.ifBlank { verified.serverName }
-                persist { it.copy(controlAddress = control, controlName = savedName) }
+                var serial = cameraSerial(verified.serialNumber)
+                var savedName = verified.cameraName.ifBlank { verified.serverName }
                 val chosen = if (camera.classic) adapter.getRemoteDevice(camera.address) else null
                 check(chosen == null || matchesCameraName(chosen.name, names)) { "所选系统设备与蓝牙相机名称不一致，请重新选择" }
+                val otherClassic = saved.transferAddress.takeUnless { cameraSerialMatches(serial, cameraSerial(saved.controlSerial)) }
                 val matching = adapter.bondedDevices.filter {
-                    it.type != BluetoothDevice.DEVICE_TYPE_LE && matchesCameraName(it.name, names)
+                    it.address != otherClassic && it.type != BluetoothDevice.DEVICE_TYPE_LE && matchesCameraName(it.name, names)
                 }
                 val existing = if (chosen != null) chosen.takeIf { it.bondState == BluetoothDevice.BOND_BONDED }
-                    else savedClassic?.takeIf { it in matching } ?: matching.singleOrNull()
+                    else matching.firstOrNull { restoring && it.address == saved.transferAddress } ?: matching.singleOrNull()
                 check(chosen != null || existing != null || matching.size <= 1) { "有多个同名配对记录，请在高级连接设置中选择传图设备" }
                 check(existing != null || allowSystemPairing) { "系统配对已变化，请在前台重新配对；后台不会重新发起配对" }
+                pairedAddress = existing?.address.orEmpty()
                 if (initializeCameraPairing(initializePairing, existing != null)) {
-                    ble.prepareSystemPairing(settings.state.value.pairingTimeSync).takeIf(String::isNotBlank)?.let(names::add)
+                    if (!registerOnFirstLink) ble.prepareSystemPairing(saved.pairingTimeSync).takeIf(String::isNotBlank)?.let(names::add)
+                    // Stage one ends on the registration link, including when Android already holds a classic bond.
+                    ble.disconnectForHandoff(control)
                 }
                 val paired = existing ?: run {
                     check(chosen != null || names.isNotEmpty()) { "未读到相机名称，无法关联系统配对设备" }
                     // Complete the application exchange before leaving BLE and searching for the camera's classic address.
-                    ble.disconnect()
                     progress("身份验证已完成，正在搜索对应的系统配对设备")
-                    awaitSystemPairing(names, chosen, ::progress)
+                    awaitSystemPairing(names, chosen, otherClassic, ::progress)
                 }
                 currentCoroutineContext().ensureActive()
                 check(paired.bondState == BluetoothDevice.BOND_BONDED) { "系统尚未确认相机配对成功" }
                 pairedAddress = paired.address
-                persist { it.copy(controlAddress = control, transferAddress = paired.address) }
                 if (!ble.state.value.authenticated || ble.state.value.connectedAddress != control) {
                     progress("系统配对已完成，正在重新发现 BLE 控制地址")
-                    control = ble.rediscover(names + paired.name.orEmpty(), control).address
-                    val restored = connectControl(control, names, ::progress)
+                    control = ble.rediscover(names + paired.name.orEmpty(), control, serial ?: expectedSerial).address
+                    val restored = connectControl(control, names, ::progress, serial ?: expectedSerial)
                     control = restored.connectedAddress
-                    persist { it.copy(controlAddress = control, controlName = restored.cameraName.ifBlank { restored.serverName }) }
+                    val restoredSerial = cameraSerial(restored.serialNumber)
+                    serial = restoredSerial ?: serial
+                    savedName = restored.cameraName.ifBlank { restored.serverName.ifBlank { savedName } }
                 }
                 currentCoroutineContext().ensureActive()
                 synchronized(this@BluetoothPairingCoordinator) {
                     if (generation != token) throw CancellationException("相机选择已变化")
-                    ble.completePairing(control, paired.address)
+                    ble.completePairing(control, paired.address) {
+                        settings.update { it.copy(controlAddress = control, controlName = savedName, transferAddress = paired.address,
+                            controlSerial = (serial ?: expectedSerial).orEmpty(), sonySelected = false) }
+                    }
                 }
             } catch (error: Exception) {
                 if (error is CancellationException && !currentCoroutineContext().isActive) throw error
                 Log.w("ProofTray.Bluetooth", "pairing sequence failed", error)
                 val prefix = if (pairedAddress.isBlank()) "配对未完成" else "系统已配对，控制连接未完成"
-                if (generation == token) ble.pairingStatus("$prefix：${error.message ?: "请重新尝试"}", false,
-                    pairedAddress.isNotBlank(), pairedAddress)
+                synchronized(this@BluetoothPairingCoordinator) {
+                    if (generation == token) {
+                        ble.disconnect()
+                        val reason = if (error is TimeoutCancellationException) "等待机身或系统配对确认超时" else error.message
+                        ble.pairingStatus("$prefix：${reason ?: "请重新尝试"}", false, pairedAddress.isNotBlank(), pairedAddress)
+                    }
+                }
             }
         }
         return checkNotNull(job)
@@ -132,7 +141,8 @@ internal class BluetoothPairingCoordinator(
         current?.join()
     }
 
-    private suspend fun connectControl(address: String, names: Set<String>, progress: (String) -> Unit): BleState {
+    private suspend fun connectControl(address: String, names: Set<String>, progress: (String) -> Unit, expectedSerial: String?,
+        registerPhone: Boolean = false): BleState {
         var current = address
         var wakeAttempted = false
         for (attempt in 0..2) {
@@ -143,16 +153,16 @@ internal class BluetoothPairingCoordinator(
                     ble.wakeSleepingCamera(current)
                     delay(1000)
                     progress("正在重新发现已唤醒的相机")
-                    current = ble.rediscover(names, current).address
+                    current = ble.rediscover(names, current, expectedSerial).address
                 }
-                return ble.connect(current, preserveHistory = true).await()
+                return ble.connect(current, preserveHistory = true, registerPhone = registerPhone, expectedSerial = expectedSerial).await()
             }
             catch (error: Exception) {
                 currentCoroutineContext().ensureActive()
                 if (attempt == 2 || names.isEmpty() || !retryableBleFailure(error)) throw error
                 progress("控制连接中断，重新扫描后重试（${attempt + 2}/3）")
                 delay(1000L shl attempt)
-                current = ble.rediscover(names, current).address
+                current = ble.rediscover(names, current, expectedSerial).address
             }
         }
         error("BLE 控制连接未能建立")
@@ -166,7 +176,7 @@ internal class BluetoothPairingCoordinator(
     }
 
     private suspend fun awaitSystemPairing(
-        names: Set<String>, selected: BluetoothDevice?, progress: (String) -> Unit
+        names: Set<String>, selected: BluetoothDevice?, otherClassic: String?, progress: (String) -> Unit
     ): BluetoothDevice {
         val events = Channel<Event>(64)
         val receiver = object : BroadcastReceiver() {
@@ -176,6 +186,7 @@ internal class BluetoothPairingCoordinator(
                     return
                 }
                 @Suppress("DEPRECATION") val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
+                if (device.address == otherClassic || device.type == BluetoothDevice.DEVICE_TYPE_LE) return
                 if (intent.action == BluetoothDevice.ACTION_FOUND) {
                     if (isNikonCameraName(device.name.orEmpty()) || matchesCameraName(device.name, names)) {
                         ble.offerClassicDevice(BleCamera(device.address, cameraBluetoothName(device.name).ifBlank { "Nikon 相机" }, true))

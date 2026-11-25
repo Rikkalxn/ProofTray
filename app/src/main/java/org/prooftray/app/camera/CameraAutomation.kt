@@ -339,7 +339,7 @@ internal class CameraAutomation(
                 bluetoothHandoff.value = BleControl(true, control.connectedAddress, false)
                 handedOff = true
                 Log.i("ProofTray.Bluetooth", "handing BLE control over to classic data connection")
-                host.ble.disconnect()
+                host.ble.disconnectForHandoff(control.connectedAddress)
                 host.ble.connectionMessage("BLE 控制已释放，正在通过经典蓝牙传图")
             }
             connection.connect(host.clientIdentity())
@@ -410,7 +410,7 @@ internal class CameraAutomation(
                 if (handedOff && currentCoroutineContext().isActive && bluetooth.get() === active && !host.ble.state.value.wifiRequested) {
                     progress("蓝牙数据通道已关闭，正在恢复 BLE 待机")
                     delay(600)
-                    restoreBluetoothStandby(control)
+                    restoreBluetoothStandby(control, policy)
                     Log.i("ProofTray.Bluetooth", "BLE standby restored after data transfer")
                 }
                 // Closing RFCOMM ended the handed-off session. Releasing on the restored GATT link would disconnect standby again.
@@ -426,27 +426,33 @@ internal class CameraAutomation(
         }
     }
 
-    private suspend fun restoreBluetoothStandby(previous: BleState) {
+    private suspend fun restoreBluetoothStandby(previous: BleState, policy: Policy) {
         var address = previous.connectedAddress
         val names = setOf(previous.cameraName, previous.serverName).filter(String::isNotBlank).toSet()
         for (attempt in 0..1) {
             try {
                 val wifi = host.camera.value
-                if (wifi.manuallyDisconnected || settings.state.value.sonySelected ||
+                val saved = settings.state.value
+                val sameTarget = !saved.sonySelected && saved.controlAddress == policy.control && saved.transferAddress == policy.transfer
+                if (wifi.manuallyDisconnected || !sameTarget ||
                     wifiHasPriority(host.ble.state.value.wifiRequested, wifi.connecting, wifi.connected)) {
                     throw CancellationException("当前操作已结束蓝牙待机恢复")
                 }
-                val restored = host.ble.connect(address, preserveHistory = true).await()
-                check(cameraSerialMatches(cameraSerial(restored.serialNumber), cameraSerial(previous.serialNumber))) {
-                    "恢复待机时相机身份不一致，请重新关联"
+                val serial = cameraSerial(previous.serialNumber) ?: cameraSerial(saved.controlSerial)
+                host.ble.connect(address, preserveHistory = true, expectedSerial = serial).await()
+                currentCoroutineContext().ensureActive()
+                if (address != policy.control) settings.update {
+                    if (it.sonySelected || it.controlAddress != policy.control || it.transferAddress != policy.transfer) {
+                        throw CancellationException("所选相机已变化")
+                    }
+                    it.copy(controlAddress = address)
                 }
-                if (address != settings.state.value.controlAddress) settings.update { it.copy(controlAddress = address) }
                 return
             } catch (error: Exception) {
                 currentCoroutineContext().ensureActive()
                 if (attempt != 0 || names.isEmpty() || !retryableBleFailure(error)) throw error
                 delay(1000)
-                address = host.ble.rediscover(names, address).address
+                address = host.ble.rediscover(names, address, cameraSerial(previous.serialNumber)).address
             }
         }
     }

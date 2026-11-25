@@ -1,6 +1,7 @@
 package org.prooftray.app.camera
 
 import android.net.Network
+import android.os.Build
 import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
@@ -12,7 +13,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
 import java.security.SecureRandom
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 import org.prooftray.app.data.PreviewImageInfo
 import org.prooftray.app.domain.MediaFormat
@@ -26,7 +28,7 @@ internal class PtpLink(
     sonyAccess: SonyAccess? = null, private val expectedMake: CameraMake = CameraMake.OTHER, private val diagnostic: (String) -> Unit = {}
 ) : Closeable {
     private val lock = Any()
-    private val closed = AtomicBoolean(false)
+    private val closed = CountDownLatch(1)
     private val transport = PtpTransport(network, host, port, sonyAccess)
     @Volatile var make = CameraMake.OTHER
         private set
@@ -35,13 +37,17 @@ internal class PtpLink(
     private var transaction = 0L
     private lateinit var input: DataInputStream
     private lateinit var output: OutputStream
+    private lateinit var eventOutput: OutputStream
+    private val sonyProbe = SonyPtpProbe({ sendEventPacket(13) }, ::closeWithCause)
     lateinit var device: JSONObject
         private set
     @Volatile private var operations = emptySet<Int>()
     private var sonyContents: SonyContentsCatalog? = null
     private var sonyMtpTransfer = false
+    private var pendingSonyStorage = false
+    @Volatile private var sonyTransferError: Long? = null
     private var sonyProperties = emptySet<Int>()
-    private var sonyReportSize = false
+    private val sonyReportSize by lazy { sonyProperty(0xe116)?.supportsFileSizeReport == true }
     private var sonyOriginal: SonyMediaFile? = null
     private var sonyReadStamp: Long? = null
     private val rejectedPreviewOperations = mutableSetOf<Int>()
@@ -56,7 +62,8 @@ internal class PtpLink(
             input = command.input
             output = command.output
             val guid = ByteBuffer.allocate(16).putLong(identity.mostSignificantBits).putLong(identity.leastSignificantBits).array()
-            output.write(NativePtp.initialize(guid, "ProofTray"))
+            val clientName = if (expectedMake == CameraMake.SONY) Build.MODEL.orEmpty().take(39).ifBlank { "ProofTray" } else "ProofTray"
+            output.write(NativePtp.initialize(guid, clientName))
             output.flush()
             val (type, body) = frame(input, 1024 * 1024)
             if (type == 5) {
@@ -69,49 +76,65 @@ internal class PtpLink(
             val eventInput = events.input
             events.output.write(packet(3, uintBytes(connection)))
             events.output.flush()
-            val (eventType, _) = frame(eventInput, 1024 * 1024)
+            val (eventType, eventBody) = frame(eventInput, 1024 * 1024)
+            if (eventType == 5) {
+                diagnostic("PTP/IP 事件通道 InitFail 0x${eventBody.uint(0).toString(16)}")
+                throw IOException("机身拒绝建立传图事件通道，请查看机身连接提示")
+            }
             check(eventType == 4) { "PTP/IP 事件通道未被相机接受" }
-            if (expectedMake != CameraMake.NIKON) {
+            listenToEvents(events)
+            if (expectedMake == CameraMake.OTHER) {
                 try { readDevice() } catch (error: PtpResponseException) {
-                    if (expectedMake != CameraMake.OTHER || error.response != 0x2003) throw error
+                    if (error.response != 0x2003) throw error
                 }
             }
-            if (expectedMake == CameraMake.SONY) check(make == expectedMake) { "Wi-Fi 设备与已配对的索尼相机不符" }
-            if (make == CameraMake.SONY) {
+            if (expectedMake == CameraMake.SONY || make == CameraMake.SONY) {
                 openSonyImport()
             } else {
                 transact(0x1002, longArrayOf(SecureRandom().nextInt(Int.MAX_VALUE).toLong() + 1), false, null, 0)
                 transaction = 1
                 readDevice()
+                if (expectedMake == CameraMake.NIKON) check(make == expectedMake) { "Wi-Fi 设备与已配对的尼康相机不符" }
                 check(make != CameraMake.SONY) { "请从相机页选择这台索尼机身，重新开启智能手机传输会话" }
             }
             rejectedPreviewOperations.clear()
-            connected = true
-            events.listenForEvents()
-            Thread({
-                try {
-                    while (connected) {
-                        val (kind, payload) = frame(eventInput, 1024 * 1024)
-                        if (kind == 13) { events.output.write(packet(14)); events.output.flush() }
-                        if (kind == 8 && payload.size >= 6) {
-                            val code = (payload[0].toInt() and 255) or ((payload[1].toInt() and 255) shl 8)
-                            val sonyChanged = make == CameraMake.SONY && code == SONY_CONTENTS_CHANGED
-                            if (code in setOf(0x4004, 0x4005, 0x400b) || sonyChanged) catalogRevision++
-                            if (code in setOf(0x4002, 0x4003, 0x4004, 0x4005, 0x400b, 0x400d, 0xc101, 0xc102)) catalogSignals.trySend(Unit)
-                            if (make == CameraMake.SONY && code in setOf(0xc201, 0xc202, 0xc203, 0xc20d, SONY_CONTENTS_CHANGED)) {
-                                catalogSignals.trySend(Unit)
-                            }
-                        }
-                    }
-                } catch (error: Exception) {
-                    if (connected) Log.w("ProofTray.Camera", "PTP event channel ended", error)
-                    closeWithCause(error)
-                }
-            }, "ProofTray-PTP-events").apply { isDaemon = true; start() }
+            synchronized(closed) {
+                check(closed.count != 0L) { "传图会话已断开" }
+                connected = true
+            }
         } catch (error: Exception) {
             close()
             throw IOException("连接相机失败：${error.message}", error)
         }
+    }
+
+    private fun listenToEvents(events: PtpPipe) {
+        eventOutput = events.output
+        events.listenForEvents()
+        Thread({
+            try {
+                while (closed.count != 0L) {
+                    val (kind, payload) = frame(events.input, 1024 * 1024)
+                    if (kind == 13) sendEventPacket(14)
+                    if (kind == 14 && payload.isEmpty()) sonyProbe.answered()
+                    if (kind != 8 || payload.size < 6) continue
+                    val code = (payload[0].toInt() and 255) or ((payload[1].toInt() and 255) shl 8)
+                    val sony = make == CameraMake.SONY || expectedMake == CameraMake.SONY
+                    if (sony && code == 0xc20d && payload.size >= 10) sonyTransferError = payload.uint(6)
+                    if (code in setOf(0x4004, 0x4005, 0x400b) || (sony && code == SONY_CONTENTS_CHANGED)) catalogRevision++
+                    if (code in setOf(0x4002, 0x4003, 0x4004, 0x4005, 0x400b, 0x400d, 0xc101, 0xc102) ||
+                        (sony && code in setOf(0xc201, 0xc202, 0xc203, 0xc20d, SONY_CONTENTS_CHANGED))) catalogSignals.trySend(Unit)
+                }
+            } catch (error: Exception) {
+                if (closed.count != 0L) Log.w("ProofTray.Camera", "PTP event channel ended", error)
+                closeWithCause(error)
+            }
+        }, "ProofTray-PTP-events").apply { isDaemon = true; start() }
+    }
+
+    private fun sendEventPacket(type: Int) = synchronized(eventOutput) {
+        eventOutput.write(packet(type))
+        eventOutput.flush()
     }
 
     private fun readDevice() {
@@ -121,19 +144,72 @@ internal class PtpLink(
     }
 
     private fun openSonyImport() {
-        // GetDeviceInfo used transaction 0. Sony keeps incrementing through descriptions and session opening, without a reset.
-        transaction = 1
-        // Both device descriptions are read before choosing a function mode, as in the Creators' App initializer.
-        val description = if (0x923a in operations) {
-            val dd = sonyDescription(data(0x923a, longArrayOf(1), 1024 * 1024L))
-            val did = sonyDescription(data(0x923a, longArrayOf(2), 1024 * 1024L))
-            SonyDescription(did.server ?: dd.server, did.transfer ?: dd.transfer)
-        } else SonyDescription()
-        val contentsMode = (description.server ?: 0.0) >= 4.0
+        var haveDeviceInfo = make == CameraMake.SONY
+        if (haveDeviceInfo) transaction = 1 // A manually selected Wi-Fi camera was already identified with transaction zero.
+        val description by lazy {
+            fun readDescription(type: Long): SonyDescription {
+                val bytes = ByteArrayOutputStream()
+                transact(0x923a, longArrayOf(type), false, bytes, 1024 * 1024L)
+                return sonyDescription(bytes.toByteArray())
+            }
+            if (0x923a in operations) {
+                val dd = readDescription(1)
+                val did = readDescription(2)
+                SonyDescription(did.server ?: dd.server, did.transfer ?: dd.transfer, did.mediaServer ?: dd.mediaServer)
+            } else SonyDescription()
+        }
+        var retries = 0
+        while (true) {
+            try {
+                if (!haveDeviceInfo) readDevice()
+                check(make == CameraMake.SONY) { "Wi-Fi 设备与已配对的索尼相机不符" }
+                initializeSony(description)
+                break
+            } catch (error: PtpResponseException) {
+                if (retries == 7 || (error.response != 0xa101 && (error.response != 0x201e || make != CameraMake.SONY))) throw error
+                if (error.response == 0x201e) transact(0x1003, longArrayOf(), false, null, 0)
+                retries++
+                diagnostic("索尼传图会话初始化 · 0x${error.response.toString(16)} · ${retries} 秒后重试")
+                check(!closed.await(retries.toLong(), TimeUnit.SECONDS)) { "传图会话已断开" }
+                haveDeviceInfo = false
+            }
+        }
+        val contentsMode = description.contentsMode
+        Log.i("ProofTray.Camera", "Sony import: server=${description.server} catalog=${if (contentsMode) "contents" else "MTP"}")
+        pendingSonyStorage = true
+        if (contentsMode) {
+            sonyContents = SonyContentsCatalog({ op, params -> data(op, params) }, ::sonySlots)
+            return
+        }
+        if (0x9212 in operations) {
+            sonyTransferError = null
+            transact(0x9212, longArrayOf(2, 1, 0), false, null, 0)
+            sonyMtpTransfer = true
+            awaitSonyTransferMode()
+        }
+    }
+
+    private fun awaitSonyTransferMode() {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (true) {
+            val status = try { sonyProperty(0xd295)?.value } catch (error: PtpResponseException) {
+                if (error.response != 0x2019) throw error
+                0L
+            }
+            sonyTransferError?.let { error("机身未进入手机选片模式（0xC20D · $it），请检查机身提示") }
+            if (status == null || status == 1L) return
+            check(System.nanoTime() < deadline) { "机身尚未允许手机选片，请检查传输模式后重试" }
+            check(!closed.await(250, TimeUnit.MILLISECONDS)) { "传图会话已断开" }
+        }
+    }
+
+    private fun initializeSony(description: SonyDescription) {
+        val contentsMode = description.contentsMode
         check(!contentsMode || !description.transfer.equals("Disable", true)) { "机身当前未开放照片传输，请检查智能手机连接设置" }
-        if (contentsMode || 0x9210 in operations) transact(0x9210, longArrayOf(1, if (contentsMode) 2 else 1), false, null, 0)
+        val sdioOpen = description.usesSdioOpen(operations)
+        if (sdioOpen) transact(0x9210, longArrayOf(1, if (contentsMode) 2 else 1), false, null, 0)
         else transact(0x1002, longArrayOf(1), false, null, 0)
-        if (0x9201 in operations && 0x9202 in operations) {
+        if (sdioOpen || description.server != null || 0x9201 in operations || 0x9202 in operations) {
             fun connectPhase(phase: Long) {
                 transact(0x9201, longArrayOf(phase, 0, 0), false, ByteArrayOutputStream(), 64 * 1024L)
             }
@@ -150,28 +226,15 @@ internal class PtpLink(
             }
             connectPhase(3)
         }
-        Log.i("ProofTray.Camera", "Sony import: server=${description.server} catalog=${if (contentsMode) "contents" else "MTP"}")
-        if (contentsMode) {
-            sonyReportSize = sonyProperty(0xe116)?.supportsFileSizeReport == true
-            sonyContents = SonyContentsCatalog({ op, params -> data(op, params) }, ::sonySlots)
-            return
-        }
-        if (0x9212 in operations) {
-            transact(0x9212, longArrayOf(2, 1, 0), false, null, 0)
-            sonyMtpTransfer = true
-        }
-        for (attempt in 1..25) {
-            try { if (storageIds().isNotEmpty()) return }
-            catch (error: PtpResponseException) { if (error.response != 0x2013 && error.response != 0x2019) throw error }
-            if (attempt < 25) Thread.sleep(300)
-        }
-        error("索尼相机已连接，但存储卡尚未就绪，请检查机身或重试")
     }
 
-    fun finishSonyImport() = synchronized(lock) {
-        if (!connected || make != CameraMake.SONY) return@synchronized
-        if (sonyMtpTransfer) transact(0x9212, longArrayOf(2, 0, 1), false, null, 0)
-        transact(0x1003, longArrayOf(), false, null, 0)
+    fun finishImportSession() = synchronized(lock) {
+        if (!connected) return@synchronized
+        try {
+            if (sonyMtpTransfer) transact(0x9212, longArrayOf(2, 0, 1), false, null, 0)
+        } finally {
+            if (connected) transact(0x1003, longArrayOf(), false, null, 0)
+        }
         Unit
     }
 
@@ -188,7 +251,7 @@ internal class PtpLink(
         val advertised = (1..2).filter { 0xd1d3 + it in sonyProperties }
         val states = advertised.ifEmpty { listOf(1, 2) }.map { slot -> slot to sonyProperty(0xd1d3 + slot) }
         val readable = states.filter { (_, state) -> state == null || state.contentsReadable }.map { it.first }
-        if (readable.isEmpty()) {
+        if (readable.isEmpty() && !pendingSonyStorage) {
             val detail = "Sony 卡槽状态：" + states.joinToString { (slot, state) ->
                 "slot=$slot enabled=${state?.enabled} value=0x${state?.value?.toString(16)}"
             }
@@ -200,11 +263,34 @@ internal class PtpLink(
 
     fun sonyCatalogCursor(storage: Long? = null, direction: CatalogDirection = CatalogDirection.NEWEST,
         startAt: SonyCaptureDay? = null): SonyContentsCatalog.Cursor? = synchronized(lock) {
-        sonyContents?.cursor(storage?.toInt(), direction, startAt)
+        val catalog = sonyContents ?: return@synchronized null
+        readFirstSonyDirectory { catalog.cursor(storage?.toInt(), direction, startAt) }
     }
     fun nextSonyPage(cursor: SonyContentsCatalog.Cursor): List<Long> = synchronized(lock) { cursor.next() }
     fun storageIds(): LongArray = synchronized(lock) {
-        if (sonyContents != null) sonySlots().map(Int::toLong).toLongArray() else NativePtp.handles(data(0x1004))
+        if (sonyContents != null) return@synchronized sonySlots().map(Int::toLong).toLongArray()
+        readFirstSonyDirectory(LongArray::isNotEmpty) { NativePtp.handles(data(0x1004)) }
+    }
+
+    private fun <T> readFirstSonyDirectory(ready: (T) -> Boolean = { true }, read: () -> T): T {
+        if (!pendingSonyStorage) return read()
+        // A live session can precede the card mount. Retry the first directory request without renegotiating Wi-Fi.
+        var attempt = 1
+        while (true) {
+            if (attempt == 25) pendingSonyStorage = false
+            try {
+                val value = read()
+                if (ready(value) || attempt == 25) {
+                    pendingSonyStorage = false
+                    return value
+                }
+            } catch (error: Exception) {
+                if (error !is SonyCatalogNotReady && (error !is PtpResponseException || error.response !in setOf(0x2013, 0x2019))) throw error
+                if (!pendingSonyStorage) throw error
+            }
+            attempt++
+            check(!closed.await(300, TimeUnit.MILLISECONDS)) { "传图会话已断开" }
+        }
     }
     fun objectHandles(storage: Long): LongArray = synchronized(lock) {
         check(sonyContents == null) { "索尼内容目录需要按拍摄日期读取" }
@@ -228,7 +314,12 @@ internal class PtpLink(
 
     val chunkSize: Int get() = if (make == CameraMake.SONY) SONY_CHUNK else 1024 * 1024
     fun supportsPartial(size: Long): Boolean = make == CameraMake.SONY || largePartialOp() != null || (0x101b in operations && size < 0xffff_ffffL)
-    fun ping() = synchronized(lock) { data(0x1001); Unit }
+    fun ping() = synchronized(lock) {
+        try { data(0x1001) } catch (error: PtpResponseException) {
+            if (error.response != 0x2019) throw error // A busy reply still confirms that the camera is responding.
+        }
+        Unit
+    }
     fun supportsLocation(): Boolean = make == CameraMake.NIKON && 0x9523 in operations
 
     suspend fun awaitCatalogChange(milliseconds: Long) {
@@ -421,12 +512,13 @@ internal class PtpLink(
         outgoing: ByteArray? = null, progress: (Long) -> Unit = {}, onResponse: ((LongArray) -> Unit)? = null
     ): Long {
         val id = transaction
-        if (transaction > 0) transaction++
+        if (expectedMake == CameraMake.SONY || transaction > 0) transaction++
         var declared = -1L
         var received = 0L
         var ended = false
         var lastType = -1
         val tracePreview = operation == GET_FHD_PICTURE || operation == GET_LSS_IMAGE
+        val probe = sonyProbe.takeIf { make == CameraMake.SONY || expectedMake == CameraMake.SONY }
         try {
             output.write(NativePtp.command(operation, id, params, receive, outgoing != null))
             if (outgoing != null) {
@@ -436,6 +528,7 @@ internal class PtpLink(
                 output.write(packet(12, uintBytes(id) + outgoing))
             }
             output.flush()
+            probe?.progress(operation)
             val scratch = ByteArray(64 * 1024)
             while (true) {
                 val header = ByteArray(8).also { input.readFully(it) }
@@ -452,6 +545,7 @@ internal class PtpLink(
                         declared = if (start.size == 12) ByteBuffer.wrap(start, 4, 8).order(ByteOrder.LITTLE_ENDIAN).long else start.uint(4)
                         check(declared >= 0 && declared <= maximum) { "相机报告的传输大小超出限制：$declared" }
                         if (tracePreview) Log.i("ProofTray.Preview", "wire op=0x${operation.toString(16)} start declared=$declared")
+                        probe?.progress(operation)
                     }
                     10, 12 -> {
                         check(remaining >= 4 && declared >= 0 && !ended && sink != null) { "PTP 数据包顺序错误" }
@@ -466,6 +560,7 @@ internal class PtpLink(
                             received += count
                             remaining -= count
                             progress(received)
+                            probe?.progress(operation)
                         }
                         if (type == 12) {
                             ended = true
@@ -507,16 +602,21 @@ internal class PtpLink(
             val failure = IOException(message, error)
             closeWithCause(failure)
             throw failure
-        }
+        } finally { probe?.stop() }
     }
 
     override fun close() = closeWithCause(null)
 
     private fun closeWithCause(error: Throwable?) {
-        if (!closed.compareAndSet(false, true)) return
-        val notify = connected && error != null
-        connected = false
+        val notify = synchronized(closed) {
+            if (closed.count == 0L) return
+            closed.countDown()
+            val active = connected
+            connected = false
+            active && error != null
+        }
         catalogSignals.close()
+        sonyProbe.close()
         transport.close()
         if (notify) onDisconnected(requireNotNull(error))
     }

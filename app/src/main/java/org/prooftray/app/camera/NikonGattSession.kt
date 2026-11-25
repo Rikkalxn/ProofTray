@@ -48,9 +48,10 @@ internal suspend fun subscribeNikonProfile(present: (String) -> Boolean, subscri
             while (control == 0x81) poll()
         }
     }
-    check(control == 0) { "尼康控制点通知订阅失败（$control）" }
+    check(control == 0) { control?.let { "尼康控制点（2008）订阅失败 · ${bluetoothGattCode(it)}。 ${bluetoothGattReason(it)}" }
+        ?: "未收到尼康控制点（2008）的订阅回调" }
     for (id in listOf("200a", "2081")) {
-        if (present(id)) subscribe(id, false)?.let { check(it == 0) { "尼康特征 $id 订阅失败，GATT 状态码 $it" } }
+        if (present(id)) subscribe(id, false)?.let { check(it == 0) { "尼康特征 $id 订阅失败 · ${bluetoothGattCode(it)}。 ${bluetoothGattReason(it)}" } }
     }
     // The reference waits for an indication descriptor callback. Identity is verified by the subsequent challenge exchange.
     suspend fun indicate(id: String) { check(subscribe(id, true) != null) { "未收到尼康特征 $id 的指示订阅回调" } }
@@ -220,8 +221,11 @@ internal class NikonGattSession(
                 is CancellationException, is BleTransportException -> error
                 is DeviceDisconnectedException -> BleTransportException("BLE $name 时连接已结束")
                 is BluetoothDisabledException -> BleTransportException("手机蓝牙已关闭", false)
-                is RequestFailedException -> if (error.status == FailCallback.REASON_TIMEOUT) BleTransportException("BLE $name 超时")
-                    else throw IllegalStateException("BLE $name 被拒，状态码 ${error.status}", error)
+                is RequestFailedException -> {
+                    val detail = "尼康蓝牙$name · ${bluetoothGattCode(error.status)}。 ${bluetoothGattReason(error.status)}"
+                    if (error.status !in setOf(FailCallback.REASON_TIMEOUT, 133, 147, 257)) throw IllegalStateException(detail, error)
+                    BleTransportException(detail)
+                }
                 else -> throw error
             }
             stop(cause)

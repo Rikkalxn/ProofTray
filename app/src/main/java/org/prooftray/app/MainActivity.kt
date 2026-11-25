@@ -115,16 +115,19 @@ class MainActivity : ComponentActivity() {
                     onDisconnectCamera = model::disconnectCamera,
                     onDisconnectWifi = model.camera::disconnectWifiSession,
                     onRetryConnection = {
-                        val bluetooth = state.camera.bluetoothAssisted
-                        access.withPermissions(bluetooth, scanning = bluetooth, wifi = true) {
-                            access.withPhoneWifi { model.camera.retryConnection() }
+                        if (state.camera.pairingTarget != null) access.withPermissions(true, scanning = true, action = model.camera::retryConnection)
+                        else {
+                            val bluetooth = state.camera.bluetoothAssisted
+                            access.withPermissions(bluetooth, scanning = bluetooth, wifi = true) {
+                                access.withPhoneWifi { model.camera.retryConnection() }
+                            }
                         }
                     },
                     onRefreshCamera = model.camera::refresh,
                     onDiscoverCamera = { access.withPermissions(false) { model.camera.discoverSta() } },
                     onOpenWifi = access::openWifiPanel,
                     onScanBle = { access.withPermissions(true, scanning = true) { model.camera.scanBle() } },
-                    onConnectBle = { camera -> access.withPermissions(true) { model.camera.connectBle(camera) } },
+                    onConnectBle = { camera -> access.withPermissions(true, scanning = true) { model.camera.connectBle(camera) } },
                     onDiscoverClassic = { access.withPermissions(true, scanning = true) { model.camera.discoverClassic() } },
                     onStopBleScan = model.camera::stopBleScan,
                     onWakeWifi = access::switchToCameraWifi,

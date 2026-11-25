@@ -372,7 +372,8 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         }
         if (address != preferences.state.value.controlAddress) camera.disconnect()
         preferences.update {
-            it.copy(controlAddress = address, controlName = state.value.pairedDevices.find { device -> device.address == address }?.name.orEmpty())
+            it.copy(controlAddress = address, controlSerial = if (it.controlAddress == address) it.controlSerial else "",
+                controlName = state.value.pairedDevices.find { device -> device.address == address }?.name.orEmpty())
         }
     }
     fun chooseTransferDevice(address: String) {

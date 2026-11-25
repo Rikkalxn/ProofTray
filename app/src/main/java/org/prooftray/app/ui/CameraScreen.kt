@@ -61,8 +61,9 @@ internal fun CameraScreen(
     BackHandler(enabled = panel != null) { openPanel(null) }
     val summary = cameraConnectionSummary(state)
     val saved = state.settings.selectedAddress.isNotBlank()
-    val nikon = saved && !state.settings.sonySelected && state.camera.make != CameraMake.SONY
-    val name = if (state.camera.connected) state.camera.cameraName else state.settings.selectedName
+    val nikon = state.hasSelectedNikon
+    val pairing = state.camera.pairingTarget
+    val showNikonDiagnostics = if (pairing != null) pairing.make == CameraMake.NIKON else !state.settings.sonySelected
     LaunchedEffect(initialPanel) {
         if (initialPanel == CameraPanel.SEARCH && !state.ble.scanning) actions.onScanBle()
     }
@@ -73,7 +74,7 @@ internal fun CameraScreen(
             Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(name.ifBlank { "我的相机" }, style = MaterialTheme.typography.headlineSmall)
+                        Text(state.connectionCameraName.ifBlank { "我的相机" }, style = MaterialTheme.typography.headlineSmall)
                         Text(summary.title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Box {
@@ -159,8 +160,8 @@ internal fun CameraScreen(
                     if (!state.ble.scanning && state.ble.cameras.isEmpty()) Text("未发现相机")
                     state.ble.cameras.forEach { camera ->
                         OutlinedButton(onClick = { panel = null; actions.onConnectBle(camera) },
-                            enabled = !summary.busy && !state.camera.connected, modifier = Modifier.fillMaxWidth()) {
-                            Text(camera.name)
+                            enabled = camera.pairingAvailable && !summary.busy && !state.camera.connected, modifier = Modifier.fillMaxWidth()) {
+                            Text(if (camera.pairingAvailable) camera.name else "${camera.name} · 请在机身打开「智能手机连接」")
                         }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -179,18 +180,23 @@ internal fun CameraScreen(
                 SectionCard("连接诊断", glyph = AppGlyph.SETTINGS) {
                     SelectionContainer {
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("Wi-Fi：${state.camera.stage}")
+                            if (pairing == null) Text(state.camera.stage)
+                            else if (!showNikonDiagnostics) Text("蓝牙配对 · ${state.camera.stage}")
                             state.camera.protocolDiagnostic?.let { Text(it) }
-                            state.camera.message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                            TextButton(onClick = actions.onOpenWifi) { Text("系统 Wi-Fi 面板") }
-                            if (!state.settings.sonySelected) Text("蓝牙：${state.ble.message}")
-                            if (!state.settings.sonySelected) state.ble.history.forEachIndexed { index, message ->
-                                Text("${index + 1}. $message", style = MaterialTheme.typography.bodySmall)
+                            if (pairing == null) {
+                                state.camera.message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                                TextButton(onClick = actions.onOpenWifi) { Text("系统 Wi-Fi 面板") }
+                            }
+                            if (showNikonDiagnostics) {
+                                Text("蓝牙：${state.ble.message}")
+                                state.ble.history.forEachIndexed { index, message ->
+                                    Text("${index + 1}. $message", style = MaterialTheme.typography.bodySmall)
+                                }
                             }
                         }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (!state.settings.sonySelected) {
+                        if (showNikonDiagnostics && pairing == null) {
                             TextButton(onClick = actions.onDiscoverClassic, enabled = saved && !summary.busy && !state.camera.connected) {
                                 Text("重新检查配对")
                             }
@@ -226,6 +232,7 @@ private fun ManualConnection(state: LibraryUiState, actions: LibraryActions, vis
     var modeIndex by rememberSaveable { mutableStateOf(0) }
     var apHost by rememberSaveable { mutableStateOf("") }
     var staHost by rememberSaveable { mutableStateOf("") }
+    var discoveredSonyHost by rememberSaveable { mutableStateOf("") }
     var ssid by rememberSaveable { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var port by rememberSaveable { mutableStateOf("15740") }
@@ -265,7 +272,8 @@ private fun ManualConnection(state: LibraryUiState, actions: LibraryActions, vis
                     OutlinedButton(onClick = {
                         staHost = endpoint.host
                         port = endpoint.port.toString()
-                        manualAuth = endpoint.make == CameraMake.SONY && !state.settings.sonySelected
+                        discoveredSonyHost = if (endpoint.make == CameraMake.SONY) endpoint.host else ""
+                        if (endpoint.make != CameraMake.SONY) manualAuth = false
                     }, enabled = enabled) {
                         Text("${endpoint.name} · ${endpoint.host}")
                     }
@@ -295,9 +303,10 @@ private fun ManualConnection(state: LibraryUiState, actions: LibraryActions, vis
                     modifier = Modifier.fillMaxWidth())
             }
             PrimaryAction("连接", onClick = {
+                val discoveredSony = mode == CameraMode.STA && discoveredSonyHost.isNotBlank() && host == discoveredSonyHost
                 if (portNumber != null) actions.onConnectCamera(CameraConnection(mode, host, portNumber,
                     if (mode == CameraMode.AP) ssid else "", if (mode == CameraMode.AP) password else "",
-                    sonyAccess = access, sonyCamera = manualAuth))
+                    sonyAccess = access, sonyCamera = manualAuth || (discoveredSony && !state.settings.sonySelected)))
                 if (manualAuth) secret = ""
             }, modifier = Modifier.fillMaxWidth(), enabled = enabled && portNumber != null && portNumber in 1..65535 &&
                 (!manualAuth || access != null) && (mode == CameraMode.AP || host.isNotBlank()), glyph = AppGlyph.CAMERA)

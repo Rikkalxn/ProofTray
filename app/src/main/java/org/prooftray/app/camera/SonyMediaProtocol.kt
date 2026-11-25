@@ -24,7 +24,15 @@ internal const val SONY_CHUNK = 3 * 1024 * 1024
 internal const val SONY_THUMB_PROP = 0xd8b1
 internal const val SONY_SCREEN_PROP = 0xd8b0
 
-internal data class SonyDescription(val server: Double? = null, val transfer: String? = null)
+internal data class SonyDescription(val server: Double? = null, val transfer: String? = null, val mediaServer: String? = null) {
+    val contentsMode: Boolean get() = (server ?: 0.0) >= 4.0
+
+    fun usesSdioOpen(operations: Set<Int>): Boolean = contentsMode || when {
+        mediaServer.equals("Enable", true) -> true
+        mediaServer.equals("Disable", true) -> false
+        else -> 0x9210 in operations
+    }
+}
 
 internal fun sonyDescription(bytes: ByteArray): SonyDescription {
     require(bytes.size <= 1024 * 1024) { "机身描述过大" }
@@ -33,6 +41,7 @@ internal fun sonyDescription(bytes: ByteArray): SonyDescription {
     require(!xml.contains("<!DOCTYPE", true)) { "机身描述包含无效声明" }
     var server: Double? = null
     var transfer: String? = null
+    var mediaServer: String? = null
     var target = ""
     val value = StringBuilder()
     val reader = SAXParserFactory.newInstance().apply { isNamespaceAware = true }.newSAXParser().xmlReader
@@ -43,18 +52,21 @@ internal fun sonyDescription(bytes: ByteArray): SonyDescription {
             value.setLength(0)
         }
         override fun characters(chars: CharArray, start: Int, length: Int) {
-            if (target == "X_ServerVersion" || target == "X_PTP_ContentsTransferSupport") value.append(chars, start, length)
+            if (target == "X_ServerVersion" || target == "X_PTP_ContentsTransferSupport" || target == "X_PTP_MediaServerSupport") {
+                value.append(chars, start, length)
+            }
         }
         override fun endElement(uri: String?, local: String, name: String?) {
             if (local == target) when (local) {
                 "X_ServerVersion" -> server = value.toString().trim().toDoubleOrNull()
                 "X_PTP_ContentsTransferSupport" -> transfer = value.toString().trim()
+                "X_PTP_MediaServerSupport" -> mediaServer = value.toString().trim()
             }
             target = ""
         }
     }
     reader.parse(InputSource(StringReader(xml)))
-    return SonyDescription(server, transfer)
+    return SonyDescription(server, transfer, mediaServer)
 }
 
 internal data class SonyFileRef(val slot: Int, val content: Long, val file: Int) {

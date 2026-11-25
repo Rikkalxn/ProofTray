@@ -5,7 +5,8 @@ import kotlinx.coroutines.TimeoutCancellationException
 import no.nordicsemi.android.ble.observer.ConnectionObserver
 
 internal class BleTransportException(message: String, val retryable: Boolean = true) : IOException(message) {
-    constructor(status: Int, phase: String = "通道断开") : this("BLE $phase，GATT 状态码 $status", status in setOf(0, 8, 19, 133, 257))
+    constructor(status: Int, phase: String = "通道断开") : this("BLE $phase · ${bluetoothGattCode(status)}。 ${bluetoothGattReason(status, true)}",
+        status in setOf(0, 8, 19, 62, 133, 147, 257))
 }
 
 internal fun retryableBleFailure(error: Throwable): Boolean =
@@ -27,7 +28,7 @@ internal fun cameraBluetoothName(name: String?): String = name.orEmpty().substri
 
 /** Z6 II releases BLE before accepting the classic data connection; keep this quirk limited to the identified model. */
 internal fun needsBluetoothHandoff(names: Set<String>): Boolean = names.any {
-    Regex("^Z[ _]6[ _]2(?:_|$)", RegexOption.IGNORE_CASE).containsMatchIn(cameraBluetoothName(it))
+    Regex("^(?:Nikon[ _]+)?Z[ _]?6(?:[ _]?II|[ _]2)(?:[ _]|$)", RegexOption.IGNORE_CASE).containsMatchIn(cameraBluetoothName(it))
 }
 
 internal fun isNikonCameraName(name: String): Boolean = name.contains("Nikon", ignoreCase = true) ||

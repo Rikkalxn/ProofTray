@@ -2,6 +2,8 @@ package org.prooftray.app.camera
 
 import java.io.IOException
 
+internal class SonyCatalogNotReady : IllegalStateException("相机照片目录暂不可读，请等待机身完成存储卡准备后刷新")
+
 internal fun orderedSonyDates(dates: List<SonyCaptureDay>, direction: CatalogDirection): List<SonyCaptureDay> {
     val byDay = if (direction == CatalogDirection.OLDEST) compareBy(SonyCaptureDay::epochDay) else compareByDescending(SonyCaptureDay::epochDay)
     return dates.sortedWith(byDay.thenBy(SonyCaptureDay::slot))
@@ -56,7 +58,7 @@ internal class SonyContentsCatalog(private val read: (Int, LongArray) -> ByteArr
             readable = true
             dates += values.map { SonyCaptureDay(slot, it) }
         }
-        check(readable || onlySlot != null) { "相机照片目录暂不可读，请等待机身完成存储卡准备后刷新" }
+        if (!readable && onlySlot == null) throw SonyCatalogNotReady()
         return Cursor(orderedSonyDates(dates, direction), startAt)
     }
 

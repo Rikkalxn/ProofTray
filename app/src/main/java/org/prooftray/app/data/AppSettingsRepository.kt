@@ -23,7 +23,7 @@ class AppSettingsRepository private constructor(context: Context) {
             .putBoolean("locationSync", value.locationSync).putBoolean("pairingTimeSync", value.pairingTimeSync)
             .putBoolean("requestedTimeSync", value.requestedTimeSync)
             .putString("controlAddress", value.controlAddress)
-            .putString("controlName", value.controlName)
+            .putString("controlName", value.controlName).putString("controlSerial", value.controlSerial)
             .putBoolean("sonySelected", value.sonySelected).putString("sonyAddress", value.sonyAddress).putString("sonyName", value.sonyName)
             .putString("transferAddress", value.transferAddress).putString("bluetoothRole", value.bluetoothRole.name).also { editor ->
                 if (value.exportPreferences != mutableState.value.exportPreferences) value.exportPreferences.toPreferences().forEach { (key, item) ->
@@ -42,7 +42,7 @@ class AppSettingsRepository private constructor(context: Context) {
         autoKind = enumValue("autoKind", AutoDownloadKind.CAMERA_JPEG), powerProfile = enumValue("powerProfile", PowerProfile.BALANCED),
         locationSync = preferences.getBoolean("locationSync", false), pairingTimeSync = preferences.getBoolean("pairingTimeSync", false),
         requestedTimeSync = preferences.getBoolean("requestedTimeSync", true),
-        controlAddress = preferences.getString("controlAddress", "").orEmpty(),
+        controlAddress = preferences.getString("controlAddress", "").orEmpty(), controlSerial = preferences.getString("controlSerial", "").orEmpty(),
         transferAddress = preferences.getString("transferAddress", "").orEmpty(),
         bluetoothRole = enumValue("bluetoothRole", BluetoothRole.AUTOMATIC), controlName = preferences.getString("controlName", "").orEmpty(),
         sonySelected = preferences.getBoolean("sonySelected", false), sonyAddress = preferences.getString("sonyAddress", "").orEmpty(),
