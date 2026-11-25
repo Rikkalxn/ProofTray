@@ -73,11 +73,11 @@ class LutRepository private constructor(context: Context) {
             stream.readBounded(32 * 1024 * 1024, "文件超过 32 MiB 导入上限") { coroutine.ensureActive() }
         } ?: error("无法读取 LUT 文件")
         val extension = name.substringAfterLast('.', "").lowercase()
-        if (extension == "oblook" || extension == "json") {
+        if (extension in setOf("ptlook", "oblook", "json")) {
             importPreset(bytes, name)
         } else {
             val handle = if (extension == "png") loadHald(bytes) else {
-                require(extension == "cube") { "请选择 .cube、HaldCLUT .png 或 .oblook 预设。ZIP 请先解压。" }
+                require(extension == "cube") { "请选择 .cube、HaldCLUT .png 或 .ptlook 预设。ZIP 请先解压。" }
                 NativeColor.load(bytes, true)
             }
             try {
@@ -123,11 +123,11 @@ class LutRepository private constructor(context: Context) {
         val id = binary.sha256Hex()
         val info = NativeColor.values(handle, true)
         synchronized(lock) {
-            val table = File(root, "$id.oblut")
+            val table = File(root, "$id.ptlut")
             if (!table.exists()) write(table, binary)
             val metadataFile = File(root, "$id.lut.json")
             val unitDomain = (2..4).all { info[it] == 0f && info[it + 3] == 1f }
-            val implicit = if (!unitDomain) false else if (sourceFormat == ".oblook") embeddedImplicitDomain else info[8] == 0f
+            val implicit = if (!unitDomain) false else if (sourceFormat == ".ptlook") embeddedImplicitDomain else info[8] == 0f
             if (metadataFile.exists()) {
                 val stored = requireNotNull(readTableMetadata(metadataFile)) { "已有 LUT 元数据无法读取" }
                 if (stored.removed) updateRemoved(id, false)
@@ -170,7 +170,7 @@ class LutRepository private constructor(context: Context) {
         }
         val metadata = File(root, "$id.lut.json")
         val records = (references.map { it.first } + metadata).filter { it.isFile }.map { it to it.readBytes() }
-        val table = File(root, "$id.oblut")
+        val table = File(root, "$id.ptlut")
         try {
             // Delete the data last so failed record cleanup can restore its small JSON snapshots.
             for ((file, _) in records) check(file.delete() || !file.exists()) { "无法删除预设记录" }
@@ -222,7 +222,8 @@ class LutRepository private constructor(context: Context) {
             if (preset.look.lutId != null) {
                 val bytes = canonical(preset.look.lutId)
                 put("lut", JSONObject().apply {
-                    put("sha256", bytes.sha256Hex()); put("encoding", "oblut1-base64"); put("data", Base64.encodeToString(bytes, Base64.NO_WRAP))
+                    put("sha256", bytes.sha256Hex()); put("encoding", LookCodec.LUT_ENCODING)
+                    put("data", Base64.encodeToString(bytes, Base64.NO_WRAP))
                     val metadata = LookCodec.checkedJson(File(root, "${preset.look.lutId}.lut.json").readText())
                     put("provenance", cleanProvenance(metadata.optJSONObject("provenance")))
                     if (metadata.has("implicitUnitDomain")) put("implicitUnitDomain", metadata.getBoolean("implicitUnitDomain"))
@@ -234,14 +235,14 @@ class LutRepository private constructor(context: Context) {
 
     private fun importPreset(bytes: ByteArray, fallbackName: String): ColorImportResult {
         val json = LookCodec.checkedJson(bytes.toString(Charsets.UTF_8))
-        require(json.optString("schema") == LookCodec.PRESET_SCHEMA && json.optInt("version") in 1..LookCodec.PRESET_VERSION) {
-            "请选择 .oblook 预设，暂不支持 Lightroom XMP。"
+        require(json.optString("schema") in LookCodec.PRESET_SCHEMAS && json.optInt("version") in 1..LookCodec.PRESET_VERSION) {
+            "请选择 .ptlook 预设，暂不支持 Lightroom XMP。"
         }
         var look = LookCodec.decode(json.getJSONObject("look"))
         val packed = json.optJSONObject("lut")
         var table: LutAsset? = null
         if (packed != null) {
-            require(packed.getString("encoding") == "oblut1-base64") { "预设内 LUT 编码无效" }
+            require(packed.getString("encoding") in LookCodec.LUT_ENCODINGS) { "预设内 LUT 编码无效" }
             val binary = Base64.decode(packed.getString("data"), Base64.DEFAULT)
             val hash = binary.sha256Hex()
             require(hash == packed.getString("sha256")) { "预设中的 LUT 校验失败" }
@@ -249,12 +250,12 @@ class LutRepository private constructor(context: Context) {
             val handle = NativeColor.load(binary, false)
             val saved = try {
                 val implicit = if (packed.has("implicitUnitDomain")) packed.getBoolean("implicitUnitDomain") else null
-                saveLut(handle, json.optString("name", fallbackName), ".oblook", packed.optJSONObject("provenance"), look.usage, implicit)
+                saveLut(handle, json.optString("name", fallbackName), ".ptlook", packed.optJSONObject("provenance"), look.usage, implicit)
             } finally { NativeColor.release(handle) }
             table = saved
             look = look.copy(lutId = saved.id)
         } else if (look.lutId != null) {
-            require(File(root, "${look.lutId}.oblut").exists()) { "预设引用的 LUT 缺失，请导入完整 .oblook 文件" }
+            require(File(root, "${look.lutId}.ptlut").exists()) { "预设引用的 LUT 缺失，请导入完整 .ptlook 文件" }
             val metadata = File(root, "${look.lutId}.lut.json")
             if (metadata.isFile) table = readTableMetadata(metadata)
         }
@@ -318,7 +319,7 @@ class LutRepository private constructor(context: Context) {
 
     internal fun canonical(id: String): ByteArray = synchronized(lock) {
         require(id.matches(Regex("[a-f0-9]{64}"))) { "LUT 标识无效" }
-        val file = File(root, "$id.oblut")
+        val file = File(root, "$id.ptlut")
         require(file.isFile && file.length() <= 16 * 1024 * 1024) { "LUT 文件不存在或过大" }
         file.readBytes().also { require(it.sha256Hex() == id) { "LUT 文件内容已变化" } }
     }

@@ -411,7 +411,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         } catch (error: Exception) { showError(error.message ?: "边框模板无效") }
     }
 
-    /** Filenames are display names, not color-space declarations. Explicit .oblook metadata remains authoritative. */
+    /** Filenames are display names, not color-space declarations. Explicit .ptlook metadata remains authoritative. */
     fun importColor(uris: List<Uri>) {
         if (state.value.colorBusy) return
         if (uris.isEmpty()) {

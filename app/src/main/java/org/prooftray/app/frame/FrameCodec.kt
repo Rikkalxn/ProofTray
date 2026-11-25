@@ -25,8 +25,9 @@ import org.prooftray.app.domain.imageIds
 
 /** Data only: no scripting, HTML evaluation, resource URLs or permissive enum fallbacks. */
 internal object FrameCodec {
-    const val SCHEMA = "org.openbridge.frame"
+    const val SCHEMA = "org.prooftray.frame"
     const val VERSION = 1
+    private val SCHEMAS = setOf(SCHEMA, "org.openbridge.frame")
     const val MAX_JSON = 262144
     const val MAX_LAYERS = 32
     private val assetId = Regex("[a-f0-9]{64}")
@@ -70,7 +71,7 @@ internal object FrameCodec {
     }
 
     fun decode(json: JSONObject): FrameTemplate {
-        require(json.optString("schema") == SCHEMA) { "这不是照片边框模板" }
+        require(json.optString("schema") in SCHEMAS) { "这不是照片边框模板" }
         require(json.optInt("schemaVersion") == VERSION) { "此模板需要更新的应用版本" }
         require(json.optString("unit", "photoShortSide") == "photoShortSide") { "不支持的模板尺寸单位" }
         val params = json.optJSONObject("params") ?: JSONObject()

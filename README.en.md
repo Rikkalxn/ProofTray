@@ -19,7 +19,7 @@ Install the new version and pair your cameras again. The existing library and ra
 - Automatic compact JPEG transfer over Bluetooth after each shot (Nikon only)
 - Transfer queue with cancel and retry, resumable downloads on supported cameras
 - Ratings, tags, combined filters, RAW/JPEG pairing, burst grouping, synchronized comparison
-- RGB histogram, per-channel curves, selective color, CUBE / HaldCLUT LUTs, `.oblook` presets
+- RGB histogram, per-channel curves, selective color, CUBE / HaldCLUT LUTs, `.ptlook` presets
 - Frame templates, batch JPEG / PNG export, 16-bit Log TIFF export from RAW
 - Open a copy in another editor
 

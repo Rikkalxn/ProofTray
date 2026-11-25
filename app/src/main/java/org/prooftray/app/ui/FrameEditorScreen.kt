@@ -212,7 +212,7 @@ internal fun FrameEditorScreen(
                 })
                 DropdownMenuItem(text = { Text("导入模板") }, onClick = { closeMenu(); importTemplate.launch(arrayOf("*/*")) })
                 DropdownMenuItem(text = { Text("保存模板文件") }, onClick = {
-                    closeMenu(); saveFile.launch(current.name.take(60) + ".obframepack")
+                    closeMenu(); saveFile.launch(current.name.take(60) + ".ptframepack")
                 })
                 DropdownMenuItem(text = { Text("分享模板") }, onClick = {
                     closeMenu()

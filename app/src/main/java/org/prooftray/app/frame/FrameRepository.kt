@@ -212,7 +212,7 @@ internal class FrameRepository(context: Context) {
     fun shareFile(template: FrameTemplate): File {
         val directory = File(app.cacheDir, "frame-share").apply { mkdirs() }
         val name = template.name.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(60).ifBlank { "边框模板" }
-        return File(directory, name + "-" + UUID.randomUUID().toString().take(8) + ".obframepack").also { file ->
+        return File(directory, name + "-" + UUID.randomUUID().toString().take(8) + ".ptframepack").also { file ->
             try { file.outputStream().use { writePackage(template, it) } }
             catch (error: Throwable) { file.delete(); throw error }
         }

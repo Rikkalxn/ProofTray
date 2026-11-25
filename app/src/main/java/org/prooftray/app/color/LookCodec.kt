@@ -7,8 +7,11 @@ import org.prooftray.app.domain.LutRange
 import org.prooftray.app.domain.LutUsage
 
 object LookCodec {
-    const val PRESET_SCHEMA = "org.openbridge.look"
+    const val PRESET_SCHEMA = "org.prooftray.look"
     const val PRESET_VERSION = 2
+    const val LUT_ENCODING = "ptlut1-base64"
+    val PRESET_SCHEMAS = setOf(PRESET_SCHEMA, "org.openbridge.look")
+    val LUT_ENCODINGS = setOf(LUT_ENCODING, "oblut1-base64")
 
     fun encodeUsage(usage: LutUsage) = JSONObject().apply {
         put("input", usage.inputName); put("output", usage.outputName)

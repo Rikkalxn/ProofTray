@@ -18,7 +18,7 @@
 - 每次拍摄后通过蓝牙自动传输便携 JPEG（仅尼康）
 - 传输队列，支持取消和重试，兼容机型可续传
 - 评分、标签、组合筛选、RAW/JPEG 配对、连拍分组、同步比较
-- RGB 直方图、逐通道曲线、分色调整、CUBE / HaldCLUT LUT、`.oblook` 预设
+- RGB 直方图、逐通道曲线、分色调整、CUBE / HaldCLUT LUT、`.ptlook` 预设
 - 边框模板、批量导出 JPEG / PNG、从 RAW 导出 16 位 Log TIFF
 - 在其他编辑器中打开副本
 

@@ -104,7 +104,7 @@ internal fun rememberSystemEditor(model: LibraryViewModel): (PhotoAsset) -> Unit
     }
 }
 
-/** Saves a color preset as an .oblook file; the preset is kept as JSON so it survives the document picker recreating the activity. */
+/** Saves a color preset as a .ptlook file; the preset is kept as JSON so it survives the document picker recreating the activity. */
 @Composable
 internal fun rememberPresetExport(model: LibraryViewModel): (ColorPreset) -> Unit {
     var exportingPreset by rememberSaveable { mutableStateOf<String?>(null) }
@@ -121,6 +121,6 @@ internal fun rememberPresetExport(model: LibraryViewModel): (ColorPreset) -> Uni
         exportingPreset = JSONObject().apply {
             put("id", preset.id); put("name", preset.name); put("look", LookCodec.encode(preset.look))
         }.toString()
-        destination.launch(preset.name.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(80) + ".oblook")
+        destination.launch(preset.name.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(80) + ".ptlook")
     }
 }
