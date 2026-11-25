@@ -131,7 +131,7 @@ void ManualStacksAndStableOrdering() {
   Expect(QueryCatalog({first, second}, {}, true).groups.size() == 1, "A manual group does not require matching camera metadata");
   first.stack_id.clear();
   second.stack_id.clear();
-  first.name = "DSC_1000_OpenBridge_2M.jpg";
+  first.name = "DSC_1000_ProofTray_2M.jpg";
   second.name = "DSC_1000.NEF";
   second.format = MediaFormat::kRaw;
   second.captured_at_ms = first.captured_at_ms;

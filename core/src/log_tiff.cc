@@ -42,7 +42,7 @@ std::string Description(const LogExportSettings& settings, const LogGrade& grade
   std::ostringstream out;
   out.imbue(std::locale::classic());
   out.precision(9);
-  out << "{\"OpenBridgeLog\":1,\"encoding\":\"" << grade.spec.name
+  out << "{\"ProofTrayLog\":1,\"encoding\":\"" << grade.spec.name
       << "\",\"encodingId\":" << static_cast<int>(settings.encoding)
       << ",\"range\":\"full\",\"sampleFormat\":\"uint16\",\"normalization\":\"code10/1023\""
       << ",\"exposureEv\":" << settings.exposure_ev << ",\"warmth\":" << settings.warmth << ",\"gainEv\":" << settings.gain_ev

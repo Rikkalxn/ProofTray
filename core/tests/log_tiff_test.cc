@@ -68,7 +68,7 @@ void ReadBack(prooftray::LutEncoding encoding, double gray_code) {
   char* description = nullptr;
   Check(TIFFGetField(tiff.get(), TIFFTAG_IMAGEDESCRIPTION, &description), "Missing Log declaration");
   const std::string metadata(description);
-  Check(metadata.find("\"OpenBridgeLog\":1") != std::string::npos &&
+  Check(metadata.find("\"ProofTrayLog\":1") != std::string::npos &&
         metadata.find("\"referenceCalibrated\":false") != std::string::npos &&
         metadata.find("\"range\":\"full\"") != std::string::npos, "Incomplete Log declaration");
   std::vector<uint16_t> row(width * 3);

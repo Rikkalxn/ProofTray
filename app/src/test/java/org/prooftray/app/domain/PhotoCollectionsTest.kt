@@ -8,7 +8,7 @@ import org.junit.Test
 
 class PhotoCollectionsTest {
     private fun photo(id: String, state: DownloadState = DownloadState.REMOTE, source: String = "Z6II:123") = PhotoAsset(
-        id, "openbridge-remote://$id", "DSC_0001.NEF", MediaFormat.RAW, sizeBytes = 42_000_000,
+        id, "prooftray-remote://$id", "DSC_0001.NEF", MediaFormat.RAW, sizeBytes = 42_000_000,
         downloadState = state, sourceId = source, folder = "card:1/parent:2", inImportList = true, cameraFileKey = "key:$id"
     )
 

@@ -60,7 +60,7 @@ internal fun cameraPhoto(
     val folder = if (sonyPath.isEmpty()) "$card/parent:$parent" else "$card/${sonyPath.substringBeforeLast('/', "")}"
     val previewUri = preview(id)
     val asset = PhotoAsset(
-        id = id, uri = previewUri ?: "openbridge-remote://$id", name = name, format = format, sizeBytes = bytes,
+        id = id, uri = previewUri ?: "prooftray-remote://$id", name = name, format = format, sizeBytes = bytes,
         capturedAtMillis = time, width = info.getInt("width").takeIf { it > 0 }, height = info.getInt("height").takeIf { it > 0 },
         camera = cameraName, sourceId = sourceId, folder = folder, downloadState = DownloadState.REMOTE,
         cameraFileKey = cameraFileKey(sourceId, if (sonyPath.isEmpty()) card else folder, name, bytes, time),

@@ -12,7 +12,7 @@ import org.prooftray.app.domain.PhotoAsset
 import org.prooftray.app.domain.SavedFilter
 import org.prooftray.app.domain.jpegRepresentationKey
 
-internal class CatalogDatabase private constructor(context: Context) : SQLiteOpenHelper(context.applicationContext, "openbridge.db", null, 3) {
+internal class CatalogDatabase private constructor(context: Context) : SQLiteOpenHelper(context.applicationContext, "prooftray.db", null, 3) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE photos (id TEXT PRIMARY KEY, uri TEXT NOT NULL UNIQUE, payload TEXT NOT NULL)")
         db.execSQL("CREATE TABLE filters (id TEXT PRIMARY KEY, name TEXT NOT NULL, payload TEXT NOT NULL)")

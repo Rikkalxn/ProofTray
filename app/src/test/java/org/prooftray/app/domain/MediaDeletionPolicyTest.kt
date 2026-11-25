@@ -18,7 +18,7 @@ class MediaDeletionPolicyTest {
     }
 
     @Test fun rejectsCameraCachesAndOtherProviders() {
-        listOf("openbridge-remote://camera/1", "file:///data/user/0/org.openbridge.app/cache/7.jpg",
+        listOf("prooftray-remote://camera/1", "file:///data/user/0/org.prooftray.app/cache/7.jpg",
             "content://cloud.photos/external/images/media/7", "content://media.evil/external/file/7",
             "content://com.android.providers.media.documents/document/image:7", "https://media/external/file/7")
             .forEach { assertFalse(it, isMediaItemUri(it)) }
