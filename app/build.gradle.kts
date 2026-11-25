@@ -1,3 +1,4 @@
+import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -18,6 +19,10 @@ abstract class CollectLicenseAssets : Sync() {
     }
 }
 
+val appVersion = Properties().apply {
+    rootProject.file("version.properties").reader().use { load(it) }
+}
+
 android {
     namespace = "org.prooftray.app"
     compileSdk = 36
@@ -29,8 +34,8 @@ android {
         applicationId = "org.openbridge.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 43
-        versionName = "0.10.0"
+        versionCode = appVersion.getProperty("versionCode").toInt()
+        versionName = appVersion.getProperty("versionName")
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
