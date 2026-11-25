@@ -361,7 +361,7 @@ class PhotoRepository private constructor(context: Context) {
         }
         if ((width == null || height == null) && format == MediaFormat.HEIF) {
             // libheif reports the display dimensions after applying the container transforms.
-            val display = try { HeifBitmapDecoder.probe(context, uri)?.dimensions } catch (_: Exception) { null }
+            val display = try { HeifBitmapDecoder.probe(appContext, uri)?.dimensions } catch (_: Exception) { null }
             if (display != null) { width = display.width; height = display.height }
         }
         val make = exif?.getAttribute(ExifInterface.TAG_MAKE)?.trim().orEmpty()
