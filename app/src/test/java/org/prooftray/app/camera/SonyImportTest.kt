@@ -3,6 +3,7 @@ package org.prooftray.app.camera
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.UUID
+import okio.Buffer
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -95,12 +96,25 @@ class SonyImportTest {
         }
     }
 
-    @Test fun lanIdentityComesFromTheDigitalImagingAnnouncement() {
+    @Test fun lanIdentityComesFromTheRespondersDeviceDescription() {
         val id = UUID.fromString("00000000-0000-1000-9000-000000000001")
+        val host = "192.0.2.2"
         val st = "urn:schemas-sony-com:service:DigitalImaging:1"
-        val response = "HTTP/1.1 200 OK\r\nsT: $st\r\nUSN: uuid:$id::$st\r\nLOCATION: http://example.invalid\r\n\r\n"
-        assertEquals(id, sonyAnnouncement(response)?.id)
-        assertNull(sonyAnnouncement(response.replace(st, "upnp:rootdevice")))
+        val response = "HTTP/1.1 200 OK\r\nST: upnp:rootdevice\r\nLOCATION: http://$host:64321/dd.xml\r\n\r\n"
+        assertEquals("/dd.xml", sonyDescriptionLocation(response, host)?.path)
+        assertNull(sonyDescriptionLocation(response, "192.0.2.3"))
+        val xml = """<root xmlns="urn:schemas-upnp-org:device-1-0"><device><UDN>uuid:$id</UDN><friendlyName>Camera</friendlyName>
+            <serviceList><service><serviceType>$st</serviceType></service></serviceList></device></root>"""
+        assertEquals(SonyLanCamera(id, "Camera", host), sonyLanCamera(xml, host))
+        assertNull(sonyLanCamera(xml.replace(st, "other-service"), host))
+        assertNull(sonyLanCamera("<!DOCTYPE root>$xml", host))
+        val wire = Buffer().writeUtf8("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n<r/>\r\n0\r\n\r\n")
+        assertEquals("<r/>", readSonyDescriptionBody(wire))
+    }
+
+    @Test fun sonyHotspotIgnoresTheAndroidPlaceholderButKeepsRealLocalAddresses() {
+        assertNull(SonyControlData.bssid("02:00:00:00:00:00".toByteArray()))
+        assertEquals("02:00:00:00:00:01", SonyControlData.bssid("02:00:00:00:00:01".toByteArray()))
     }
 
     @Test fun cameraRawAndJpegShareCaptureButNeverFileIdentity() {

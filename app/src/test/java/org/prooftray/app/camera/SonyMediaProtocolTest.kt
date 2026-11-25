@@ -46,11 +46,25 @@ class SonyMediaProtocolTest {
 
     @Test fun emptyCapabilityTablesAreValidButTruncatedControlListsAreNot() {
         val empty = ByteBuffer.allocate(10).order(ByteOrder.LITTLE_ENDIAN).putShort(300).putInt(0).putInt(0).array()
-        assertTrue(sonyExtendedProperties(empty).isEmpty())
+        assertEquals(SonyExtendedCodes(), sonyExtendedCodes(empty))
         val tables = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putShort(300)
             .putInt(2).putShort(0xd1d4.toShort()).putShort(0xd1d5.toShort()).putInt(1).putShort(0xd2c1.toShort()).array()
-        assertEquals(setOf(0xd1d4, 0xd1d5), sonyExtendedProperties(tables))
-        assertThrows(IllegalArgumentException::class.java) { sonyExtendedProperties(tables.copyOf(tables.size - 1)) }
+        assertEquals(SonyExtendedCodes(setOf(0xd1d4, 0xd1d5), setOf(0xd2c1)), sonyExtendedCodes(tables))
+        assertThrows(IllegalArgumentException::class.java) { sonyExtendedCodes(tables.copyOf(tables.size - 1)) }
+    }
+
+    @Test fun phoneSelectionReadsCurrentStatusAfterControlAndVariableLengthDescriptors() {
+        val properties = ByteBuffer.allocate(96).order(ByteOrder.LITTLE_ENDIAN).putLong(4)
+        properties.putShort(0xd2c1.toShort()).putShort(6).put(0).put(0).putInt(0).put(0)
+        properties.putShort(0xd278.toShort()).putShort(0xffff.toShort()).put(0).put(1)
+            .put(0).put(2).putShort(65).putShort(0).put(0)
+        properties.putShort(0x500a).putShort(4).put(1).put(1).putShort(1).putShort(1)
+            .put(2).putShort(1).putShort(1).putShort(2).putShort(0).putShort(1)
+        val missing = properties.array().copyOf(properties.position())
+        ByteBuffer.wrap(missing).order(ByteOrder.LITTLE_ENDIAN).putLong(3)
+        assertNull(sonyTransferModeStatus(missing, setOf(0xd2c1)))
+        properties.putShort(0xd295.toShort()).putShort(2).put(0).put(1).put(0).put(1).put(0)
+        assertEquals(1L, sonyTransferModeStatus(properties.array().copyOf(properties.position()), setOf(0xd2c1)))
     }
 
     @Test fun fileSizeReportsRequireAnEnabledSupportedCommandVersion() {

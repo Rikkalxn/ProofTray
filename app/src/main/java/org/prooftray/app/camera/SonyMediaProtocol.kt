@@ -102,15 +102,17 @@ private fun ByteBuffer.skipBytes(n: Int) { require(n in 0..remaining()) { "索�
 private fun ByteBuffer.length(limit: Int): Int = u32().also { require(it <= limit) { "索尼目录字段长度无效" } }.toInt()
 private fun ByteBuffer.bytes(count: Int) = ByteArray(count).also { get(it) }
 
-internal fun sonyExtendedProperties(bytes: ByteArray): Set<Int> {
+internal data class SonyExtendedCodes(val properties: Set<Int> = emptySet(), val controls: Set<Int> = emptySet())
+
+internal fun sonyExtendedCodes(bytes: ByteArray): SonyExtendedCodes {
     val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
     require(b.remaining() >= 10) { "索尼扩展能力描述不完整" }
     b.short // protocol version
     val count = b.length((b.remaining() - 8) / 2)
     val properties = buildSet { repeat(count) { add(b.short.toInt() and 0xffff) } }
-    val controls = b.length((b.remaining() - 4) / 2)
-    b.skipBytes(controls * 2)
-    return properties
+    val controlCount = b.length((b.remaining() - 4) / 2)
+    val controls = buildSet { repeat(controlCount) { add(b.short.toInt() and 0xffff) } }
+    return SonyExtendedCodes(properties, controls)
 }
 
 internal data class SonyScalar(val enabled: Int, val value: Long) {
@@ -123,18 +125,64 @@ internal fun sonyScalar(bytes: ByteArray, code: Int): SonyScalar? {
     val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
     require(b.remaining() >= 6 && (b.short.toInt() and 0xffff) == code) { "索尼属性描述不匹配" }
     val type = b.short.toInt() and 0xffff
-    val width = when (type) { 1, 2 -> 1; 3, 4 -> 2; 5, 6 -> 4; 7, 8 -> 8; else -> return null }
     b.get() // writable
     val enabled = b.get().toInt() and 255
-    b.skipBytes(width) // default value precedes the current value
-    require(b.remaining() >= width) { "索尼属性值不完整" }
+    return b.readScalar(type, enabled)
+}
+
+private fun ByteBuffer.readScalar(type: Int, enabled: Int): SonyScalar? {
+    val width = when (type) { 1, 2 -> 1; 3, 4 -> 2; 5, 6 -> 4; 7, 8 -> 8; else -> return null }
+    skipBytes(width) // default value precedes the current value
+    require(remaining() >= width) { "索尼属性值不完整" }
     val value = when (type) {
-        1 -> b.get().toLong(); 2 -> b.get().toLong() and 255
-        3 -> b.short.toLong(); 4 -> b.short.toLong() and 0xffff
-        5 -> b.int.toLong(); 6 -> b.u32()
-        else -> b.long
+        1 -> get().toLong(); 2 -> get().toLong() and 255
+        3 -> short.toLong(); 4 -> short.toLong() and 0xffff
+        5 -> int.toLong(); 6 -> u32()
+        else -> long
     }
     return SonyScalar(enabled, value)
+}
+
+/** Read the phone-selection status out of a full or changed SDIO_GetAllExtDevicePropInfo list. */
+internal fun sonyTransferModeStatus(bytes: ByteArray, controls: Set<Int>): Long? {
+    val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    require(b.remaining() >= 8) { "索尼属性表不完整" }
+    val count = b.long
+    require(count in 0..(b.remaining() / 7).toLong()) { "索尼属性表长度无效" }
+    var status: Long? = null
+    repeat(count.toInt()) {
+        val code = b.short.toInt() and 0xffff
+        val type = b.short.toInt() and 0xffff
+        b.get()
+        val enabled = b.get().toInt() and 255
+        if (code in controls) {
+            b.skipBytes(5) // Four reserved bytes and the control descriptor's form flag.
+        } else {
+            if (code == 0xd295 && type in 1..8) status = b.readScalar(type, enabled)?.value
+            else repeat(2) { b.skipSonyValue(type) }
+            when (b.get().toInt() and 255) {
+                0 -> Unit
+                1 -> repeat(3) { b.skipSonyValue(type) }
+                2 -> repeat(2) { repeat(b.short.toInt() and 0xffff) { b.skipSonyValue(type) } }
+                else -> error("无法识别索尼属性描述格式")
+            }
+        }
+    }
+    return status
+}
+
+private fun ByteBuffer.skipSonyValue(type: Int) {
+    if (type == 0xffff) {
+        skipBytes((get().toInt() and 255) * 2)
+        return
+    }
+    val array = type in 0x4001..0x400a
+    val element = if (array) type - 0x4000 else type
+    require(element in 1..10) { "无法识别索尼属性数据类型" }
+    val width = 1 shl ((element - 1) / 2)
+    val count = if (array) u32() else 1L
+    require(count <= remaining() / width) { "索尼属性值不完整" }
+    skipBytes(count.toInt() * width)
 }
 
 internal fun validateSonyReadMetadata(params: LongArray, expectedSize: Long, previousStamp: Long, reportSize: Boolean): Long? {

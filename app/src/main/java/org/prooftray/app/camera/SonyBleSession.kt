@@ -12,11 +12,11 @@ import android.os.SystemClock
 import android.util.Log
 import java.io.IOException
 import java.nio.ByteBuffer
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
@@ -26,13 +26,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import no.nordicsemi.android.ble.TimeoutableRequest
 import no.nordicsemi.android.ble.callback.FailCallback
-import no.nordicsemi.android.ble.BleManager
-import no.nordicsemi.android.ble.ktx.suspend
 
 @SuppressLint("MissingPermission")
 internal class SonyControl(private val context: Context, private val deviceForAddress: (String) -> BluetoothDevice,
@@ -148,21 +146,22 @@ internal class SonyControl(private val context: Context, private val deviceForAd
     }
 }
 
-/** Foreground control session for the camera selected by the user. Nordic serializes the GATT requests and CCCD writes. */
+/** Foreground control session for the camera selected by the user. */
 @SuppressLint("MissingPermission")
 internal class SonyBleSession(
     context: Context, private val forPairing: Boolean, private val report: (SonyBleSession, Boolean) -> Unit, locationChanged: () -> Unit
-) : BleManager(context) {
+) {
     @Volatile private var control: BluetoothGattService? = null
     @Volatile private var pairing: BluetoothGattService? = null
     @Volatile private var verified: Pair<BluetoothGattService, String>? = null
     @Volatile private var functions: Pair<BluetoothGattService, Set<Int>>? = null
     @Volatile private var location: BluetoothGattService? = null
-    private val stopped = AtomicBoolean(false)
     private val hotspotRequests = Mutex()
-    private val gattRequests = Mutex()
     @Volatile private var hotspotStatus: SonyHotspotStatus? = null
-    val live: Boolean get() = !stopped.get() && isReady
+    private val client = SonyGattClient(context, forPairing, ::bindServices, ::onServicesInvalidated)
+    @Volatile var bluetoothDevice: BluetoothDevice? = null
+        private set
+    val live: Boolean get() = client.ready
     val controlReady: Boolean get() = live && verified?.let { it.first === control } == true
     val supportsLocation: Boolean get() = listOf(SonyLocationProtocol.STATUS, SonyLocationProtocol.LOCATION,
         SonyLocationProtocol.CAPABILITIES, SonyLocationProtocol.LOCK, SonyLocationProtocol.ENABLE,
@@ -183,49 +182,29 @@ internal class SonyBleSession(
             }
         }
         override suspend fun observe(callback: ((ByteArray) -> Unit)?) {
-            val status = requiredLocation(SonyLocationProtocol.STATUS)
-            setNotificationCallback(status).with { _, data -> data.value?.let { callback?.invoke(it) } }
-            val notify = status.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
-            val request = if (callback != null) {
-                if (notify) enableNotifications(status) else enableIndications(status)
-            } else if (notify) disableNotifications(status) else disableIndications(status)
-            await(request, 8000, "设置位置状态通知（DD01）")
+            client.observe(requiredLocation(SonyLocationProtocol.STATUS), "设置位置状态通知（DD01）", 8000, callback)
         }
         override fun close() = this@SonyBleSession.close()
     }, SystemClock::elapsedRealtimeNanos, locationChanged)
 
-    override fun isRequiredServiceSupported(gatt: BluetoothGatt): Boolean {
+    private fun bindServices(gatt: BluetoothGatt): Boolean {
         control = gatt.getService(SonyControlData.controlService)
         pairing = gatt.getService(SonyControlData.pairingService)
         location = gatt.getService(SonyLocationProtocol.service)
         return control != null || (forPairing && pairing.find(0xee01) != null)
     }
 
-    override fun onServicesInvalidated() {
+    private fun onServicesInvalidated(reason: Exception) {
         verified = null; control = null; pairing = null; location = null; functions = null
-        hotspotStatus?.failed(IOException("索尼蓝牙连接已结束"))
+        hotspotStatus?.failed(reason)
         report(this, false)
     }
 
-    override fun close() {
-        if (!stopped.compareAndSet(false, true)) return
-        hotspotStatus?.failed(IOException("索尼蓝牙连接已结束"))
-        verified = null; control = null; pairing = null; location = null; functions = null
-        try { super.close() } finally { report(this, false) }
-    }
-
-    override fun initialize() {
-        // Negotiate room for hotspot, access and location records within the connect request's timeout.
-        requestMtu(158).enqueue()
-    }
-
-    // The pairing profile can expose a different set of services once Android has completed bonding.
-    override fun shouldClearCacheWhenDisconnected(): Boolean = forPairing
+    fun close() = client.close()
 
     suspend fun open(device: BluetoothDevice) {
-        sonyGattRequest("连接索尼蓝牙并发现服务", connecting = true) {
-            connect(device).useAutoConnect(false).retry(1, 500).timeout(if (forPairing) 30_000L else 60_000L).suspend()
-        }
+        bluetoothDevice = device
+        client.open(device)
     }
 
     suspend fun acceptsExistingBond(): Boolean {
@@ -233,7 +212,7 @@ internal class SonyBleSession(
         return try {
             if (!supportsFunction(SonyControlData.SSH_INFO, 0xcc17)) return false
             // A successful protected read confirms access even if Wi-Fi authentication is still initializing.
-            read(required(0xcc17))
+            read(required(0xcc17), 30_000)
             true
         } catch (error: SonyBluetoothFailure) {
             if (!live || !error.attributeRejected) throw error
@@ -278,17 +257,14 @@ internal class SonyBleSession(
         var subscribed = false
         try {
             if (status != null && (notify || status.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)) {
-                setNotificationCallback(status).with { _, data ->
-                    data.value?.let(SonyControlData::pairResult)?.let(result::complete)
-                }
                 progress("正在订阅机身配对进度")
                 subscribed = optionalPairingRequest {
-                    await(if (notify) enableNotifications(status) else enableIndications(status), 6000, "订阅机身配对进度（EE03）")
+                    client.observe(status, "订阅机身配对进度（EE03）", 6000) { data -> SonyControlData.pairResult(data)?.let(result::complete) }
                 }
             }
             pairing.find(0xee04)?.takeIf { it.properties and BluetoothGattCharacteristic.PROPERTY_READ != 0 }?.let { info ->
                 progress("正在读取机身配对信息")
-                optionalPairingRequest { await(readCharacteristic(info), 8000, "读取机身配对信息（EE04）") }
+                optionalPairingRequest { read(info) }
             }
             supervisorScope {
                 val confirmation = async(start = CoroutineStart.LAZY) {
@@ -321,12 +297,7 @@ internal class SonyBleSession(
             }
             throw error
         } finally {
-            if (status != null) {
-                removeNotificationCallback(status)
-                if (subscribed && live) {
-                    if (notify) disableNotifications(status).enqueue() else disableIndications(status).enqueue()
-                }
-            }
+            if (subscribed && status != null) stopObserving(status)
         }
     }
 
@@ -372,7 +343,7 @@ internal class SonyBleSession(
 
     private suspend fun readAccess(device: BluetoothDevice): SonyAccess? {
         check(device.bondState == BluetoothDevice.BOND_BONDED) { "索尼系统配对已移除，请重新添加相机" }
-        return SonyControlData.access(read(required(0xcc17)))
+        return SonyControlData.access(read(required(0xcc17), 30_000))
     }
 
     suspend fun hotspot(device: BluetoothDevice): CameraConnection = hotspotRequests.withLock {
@@ -380,21 +351,24 @@ internal class SonyBleSession(
         val status = required(0xcc09)
         val watch = SonyHotspotStatus()
         hotspotStatus = watch
-        val notify = status.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
-        setNotificationCallback(status).with { _, data -> data.value?.let(SonyControlData::wifiStatus)?.let(watch::notified) }
         try {
             watch.guard {
-                await(if (notify) enableNotifications(status) else enableIndications(status), 6000, "订阅机身热点状态（CC09）")
+                client.observe(status, "订阅机身热点状态（CC09）", 6000) { data -> SonyControlData.wifiStatus(data)?.let(watch::notified) }
                 startHotspot(watch, status)
                 watch.beginInfo()
-                val ssid = wifiText(0xcc06)
-                val passphrase = wifiText(0xcc07)
-                val bssid = control.find(0xcc0c)?.let { item ->
-                    try { SonyControlData.bssid(read(item)) }
-                    catch (cancelled: CancellationException) { throw cancelled }
-                    catch (_: Exception) { null }
-                }
-                CameraConnection(ssid = ssid, password = passphrase, sonyAccess = access(device), sonyCamera = true, bssid = bssid)
+                val hotspot = withTimeoutOrNull(15_000) {
+                    val ssid = wifiText(0xcc06)
+                    val passphrase = wifiText(0xcc07)
+                    val bssid = control.find(0xcc0c)?.takeIf { it.properties and BluetoothGattCharacteristic.PROPERTY_READ != 0 }?.let {
+                        try { SonyControlData.bssid(read(it, 15_000)) }
+                        catch (failure: SonyBluetoothFailure) {
+                            if (failure.gattStatus != FailCallback.REASON_REQUEST_FAILED || !live) throw failure
+                            null // Android could not start the optional read. A returned ATT error still ends the exchange.
+                        }
+                    }
+                    CameraConnection(ssid = ssid, password = passphrase, sonyCamera = true, bssid = bssid)
+                } ?: throw IOException("读取索尼热点参数超时（CC06/CC07/CC0C）")
+                hotspot.copy(sonyAccess = access(device))
             }
         } catch (error: Exception) {
             close()
@@ -402,9 +376,7 @@ internal class SonyBleSession(
         } finally {
             watch.close()
             if (hotspotStatus === watch) hotspotStatus = null
-            if (live) {
-                if (notify) disableNotifications(status).enqueue() else disableIndications(status).enqueue()
-            }
+            stopObserving(status)
         }
     }
 
@@ -433,15 +405,9 @@ internal class SonyBleSession(
 
     private suspend fun wifiText(id: Int): String {
         val characteristic = required(id)
-        return withTimeoutOrNull(16_000) {
-            var text: String? = null
-            while (text == null) {
-                val data = read(characteristic)
-                if (data.size > 3) text = SonyControlData.wifiText(data).takeIf { it.isNotEmpty() }
-                if (text == null) delay(400)
-            }
-            text
-        } ?: error("等待索尼相机热点超时，请确认相机已开机且存储卡可读")
+        val text = SonyControlData.wifiText(read(characteristic, 15_000))
+        check(text.isNotEmpty()) { "${characteristic.displayName()}为空" }
+        return text
     }
 
     private fun required(id: Int) = control.find(id) ?: throw sonyGattFailure("查找机身特征（${id.toString(16).uppercase()}）",
@@ -455,6 +421,7 @@ internal class SonyBleSession(
         val id = (uuid.mostSignificantBits ushr 32).toInt()
         val name = when (id) {
             0xee01 -> "机身配对请求"
+            0xee04 -> "机身配对信息"
             0xcc06 -> "机身热点名称"
             0xcc07 -> "机身热点密码"
             0xcc08 -> "机身热点开关"
@@ -469,34 +436,19 @@ internal class SonyBleSession(
         return "$name（${id.toString(16).uppercase()}）"
     }
 
-    private suspend fun read(characteristic: BluetoothGattCharacteristic): ByteArray {
-        var value: ByteArray? = null
-        await(readCharacteristic(characteristic).with { _, data -> value = data.value?.clone() }, 8000, "读取${characteristic.displayName()}")
-        return requireNotNull(value) { "相机返回空的蓝牙数据" }
-    }
+    private suspend fun read(characteristic: BluetoothGattCharacteristic, timeout: Long = 8000): ByteArray =
+        client.read(characteristic, "读取${characteristic.displayName()}", timeout)
 
     private suspend fun write(
         characteristic: BluetoothGattCharacteristic, value: ByteArray, timeout: Long = 8000, allowed: () -> Boolean = { true }
     ) {
-        await(writeCharacteristic(characteristic, value, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT), timeout,
-            "写入${characteristic.displayName()}", allowed)
+        client.write(characteristic, value, "写入${characteristic.displayName()}", timeout, allowed)
     }
 
-    private suspend fun await(request: TimeoutableRequest, timeout: Long, operation: String, allowed: () -> Boolean = { true }) {
-        gattRequests.withLock {
-            if (stopped.get()) throw sonyGattFailure(operation, FailCallback.REASON_DEVICE_DISCONNECTED)
-            check(allowed()) { "索尼蓝牙请求已失效，请等待新的位置或重新连接" }
-            try { sonyGattRequest(operation) { request.timeout(timeout).suspend() } }
-            catch (stop: CancellationException) { close(); throw stop }
-            catch (error: SonyBluetoothFailure) {
-                when (error.gattStatus) {
-                    FailCallback.REASON_DEVICE_DISCONNECTED, FailCallback.REASON_BLUETOOTH_DISABLED, FailCallback.REASON_TIMEOUT -> {
-                        hotspotStatus?.failed(error)
-                        close()
-                    }
-                }
-                throw error
-            }
+    private suspend fun stopObserving(item: BluetoothGattCharacteristic) {
+        if (live) withContext(NonCancellable) {
+            try { client.observe(item, "结束${item.displayName()}通知", 6000, null) }
+            catch (failure: SonyBluetoothFailure) { Log.i("ProofTray.Bluetooth", failure.diagnostic) }
         }
     }
 }

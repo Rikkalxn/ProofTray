@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -125,6 +127,9 @@ class CameraController private constructor(private val context: Context) {
 
     init {
         scope.launch {
+            bleState.map { it.adapterEnabled }.distinctUntilChanged().collect { enabled -> if (!enabled) sony.close() }
+        }
+        scope.launch {
             while (true) {
                 delay(settings.state.value.powerProfile.pollSeconds.coerceAtLeast(15) * 1000L)
                 if (!state.value.connected) continue
@@ -183,13 +188,16 @@ class CameraController private constructor(private val context: Context) {
                 currentCoroutineContext().ensureActive()
                 progress(ConnectionPhase.PHONE_WIFI, if (config.ssid.isNotEmpty()) "正在连接热点，出现系统提示时请确认" else "正在检查手机 Wi-Fi")
                 val managedHotspot = config.mode == CameraMode.AP && config.ssid.isNotEmpty()
-                val route = plan.route ?: if (managedHotspot) {
+                val currentRoute = plan.route ?: if (managedHotspot && config.sonyCamera) {
+                    network.connectedSonyAp(config.ssid, config.bssid)
+                } else null
+                val route = currentRoute ?: if (managedHotspot) {
                     network.requestAp(config.ssid, config.password, config.security, networkLost, config.bssid)
                 } else network.wifi()
                 currentCoroutineContext().ensureActive()
                 synchronized(this@CameraController) {
                     ensureGeneration(generation)
-                    if (!managedHotspot) network.watch(route, networkLost)
+                    if (!managedHotspot || currentRoute != null) network.watch(route, networkLost)
                 }
                 network.awaitAddress(route)
                 val host = config.host.trim().ifEmpty {
@@ -203,7 +211,7 @@ class CameraController private constructor(private val context: Context) {
                     else -> CameraMake.OTHER
                 }
                 val sessionLost: (Throwable) -> Unit = { cause -> scope.launch { connectionLost(generation, cause) } }
-                val session = PtpLink(route, host, config.port, sessionLost, config.sonyAccess, expectedMake) { detail ->
+                val session = PtpLink(route, host, config.port, sessionLost, config.sonyAccess, expectedMake, config.mode) { detail ->
                     mutableState.update { if (it.generation == generation) it.copy(protocolDiagnostic = detail) else it }
                 }
                 attempt = session
@@ -224,7 +232,7 @@ class CameraController private constructor(private val context: Context) {
                     identity = cameraIdentity
                     mutableState.update { it.copy(connected = true, connecting = false, busy = false, connectionPhase = ConnectionPhase.READY,
                         cameraName = device.optString("model"), make = session.make, stage = "已连接，可导入原片", sourceId = identity,
-                        generation = generation, indexed = 0, total = 0, hasMore = false, catalogIds = emptySet()) }
+                        generation = generation, indexed = 0, total = 0, hasMore = false, catalogIds = emptySet(), protocolDiagnostic = null) }
                 }
                 Log.i("ProofTray.Camera", "connect stage=ready; model=${device.optString("model")}; firmware=${device.optString("version")}")
                 refresh()
@@ -399,7 +407,7 @@ class CameraController private constructor(private val context: Context) {
                 }
                 progress(ConnectionPhase.CAMERA_WIFI, "正在通过蓝牙开启索尼 Wi-Fi")
                 val config = sony.connection(selected.sonyAddress)
-                WifiPlan(config.copy(security = network.hotspotSecurity(config.ssid, config.bssid)), sonyId = id)
+                WifiPlan(config.copy(security = CameraWifiSecurity.WPA2), sonyId = id)
             }
             return
         }
@@ -413,7 +421,7 @@ class CameraController private constructor(private val context: Context) {
                 network.checkApSecurity(settings.security)
                 progress(ConnectionPhase.CAMERA_WIFI, "正在通过蓝牙开启机身 Wi-Fi 热点")
             }
-            if (needsBluetoothHandoff(setOf(control.cameraName, control.serverName))) {
+            if (needsBluetoothHandoff(control.modelNumber)) {
                 ble.disconnectForHandoff(control.connectedAddress)
                 ble.connectionMessage("正在切换到相机 Wi-Fi")
             }

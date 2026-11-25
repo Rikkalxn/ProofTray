@@ -82,6 +82,7 @@ internal class NikonGattSession(
     // Check radio ownership at the head of the queue, before submitting a write that changes camera mode.
     private val admission = Mutex()
     @Volatile private var service: BluetoothGattService? = null
+    @Volatile private var modelNumber: BluetoothGattCharacteristic? = null
     @Volatile private var opened = false
     val live: Boolean get() = failure.get() == null && service != null && isReady
 
@@ -91,12 +92,14 @@ internal class NikonGattSession(
     override fun getServiceDiscoveryDelay(bonded: Boolean) = 0
     override fun isRequiredServiceSupported(gatt: BluetoothGatt): Boolean {
         service = serviceIds.asSequence().mapNotNull(gatt::getService).firstOrNull { it.getCharacteristic(nikonUuid("2000")) != null }
+        modelNumber = gatt.getService(DEVICE_INFORMATION)?.getCharacteristic(MODEL_NUMBER)
         return service != null
     }
 
     override fun onServicesInvalidated() {
         val changedOnLiveLink = opened && service != null && isConnected
         service = null
+        modelNumber = null
         if (changedOnLiveLink) runOnCallbackThread { stop(BleTransportException("尼康服务已变化，需重新建立控制连接")) }
     }
 
@@ -202,10 +205,10 @@ internal class NikonGattSession(
         val writes = BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE
         return (characteristic(id)?.properties ?: 0) and writes != 0
     }
-    private fun characteristic(id: String) = service?.getCharacteristic(nikonUuid(id))
+    private fun characteristic(id: String) = if (id == "2a24") modelNumber else service?.getCharacteristic(nikonUuid(id))
     private fun required(id: String): BluetoothGattCharacteristic {
-        val current = service ?: throw (failure.get() ?: BleTransportException("尼康服务所属连接已结束"))
-        return checkNotNull(current.getCharacteristic(nikonUuid(id))) { "相机缺少尼康特征 $id" }
+        if (service == null) throw (failure.get() ?: BleTransportException("尼康服务所属连接已结束"))
+        return checkNotNull(characteristic(id)) { "相机缺少蓝牙特征 $id" }
     }
 
     // The base TimeoutableRequest KTX overload cancels in-flight work; the value-returning read/write overloads do not.
@@ -252,6 +255,8 @@ internal class NikonGattSession(
     }
 
     private companion object {
+        val DEVICE_INFORMATION: UUID = UUID.fromString("0000180a-0000-1000-8000-00805f9b34fb")
+        val MODEL_NUMBER: UUID = UUID.fromString("00002a24-0000-1000-8000-00805f9b34fb")
         val releaseTimer = Executors.newSingleThreadScheduledExecutor { job -> Thread(job, "ProofTray-BLE-close").apply { isDaemon = true } }
     }
 }

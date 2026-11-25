@@ -61,7 +61,7 @@ internal object SonyControlData {
 
     fun bssid(value: ByteArray): String? {
         val text = value.toString(Charsets.US_ASCII).trimEnd('\u0000')
-        if (!text.matches(Regex("(?i)([0-9a-f]{2}:){5}[0-9a-f]{2}")) || text == "00:00:00:00:00:00") return null
+        if (!text.matches(Regex("(?i)([0-9a-f]{2}:){5}[0-9a-f]{2}")) || text == "00:00:00:00:00:00" || text == "02:00:00:00:00:00") return null
         return text.takeIf { it.substring(0, 2).toInt(16) and 1 == 0 }
     }
 

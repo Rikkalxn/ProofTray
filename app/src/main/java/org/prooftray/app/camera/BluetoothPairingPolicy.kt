@@ -26,10 +26,10 @@ internal fun initializeCameraPairing(explicitRequest: Boolean, systemBondExists:
 
 internal fun cameraBluetoothName(name: String?): String = name.orEmpty().substringBefore('\u0000').trim()
 
-/** Z6 II releases BLE before accepting the classic data connection; keep this quirk limited to the identified model. */
-internal fun needsBluetoothHandoff(names: Set<String>): Boolean = names.any {
-    Regex("^(?:Nikon[ _]+)?Z[ _]?6(?:[ _]?II|[ _]2)(?:[ _]|$)", RegexOption.IGNORE_CASE).containsMatchIn(cameraBluetoothName(it))
-}
+// These models keep GATT when switching to Wi-Fi or classic Bluetooth. Use the Device Information model number.
+private val simultaneousBleModels = setOf("A300", "A900", "B500", "B700", "KeyMission 80", "P1000", "P1100", "W100", "W300", "W300s")
+
+internal fun needsBluetoothHandoff(modelNumber: String): Boolean = modelNumber !in simultaneousBleModels
 
 internal fun isNikonCameraName(name: String): Boolean = name.contains("Nikon", ignoreCase = true) ||
     Regex("Z[ _-]?[0-9fF].*", RegexOption.IGNORE_CASE).matches(name.trim())

@@ -57,15 +57,19 @@ internal class BluetoothPairingCoordinator(
                 val saved = settings.state.value
                 var control = if (camera.classic) saved.controlAddress else camera.address
                 check(control.isNotBlank()) { "请先搜索并连接相机的 BLE 控制设备" }
-                val knownNames = if (rediscover || camera.classic) savedNames(control) else setOf(camera.name).filter(String::isNotBlank).toSet()
                 val restoring = rediscover || camera.classic || !allowSystemPairing || saved.controlAddress.equals(control, true)
+                val registered = restoring && !initializePairing
+                val scanForTarget = rediscover || camera.classic || (registered && ble.latestAdvertisement(control) != camera)
+                val knownNames = if (scanForTarget) savedNames(control) else setOf(camera.name).filter(String::isNotBlank).toSet()
                 val expectedSerial = cameraSerial(saved.controlSerial).takeIf { restoring }
-                if (rediscover || camera.classic) {
+                if (scanForTarget) {
                     progress("正在重新发现相机当前的 BLE 地址")
-                    control = ble.rediscover(knownNames, control, expectedSerial).address
+                    control = ble.rediscover(knownNames, control, expectedSerial, registered).address
+                } else if (registered) {
+                    check(ble.registeredAdvertisement(camera)) { "机身广播未确认这台手机的登记，请在前台核对配对" }
                 }
                 val registerOnFirstLink = initializePairing && !restoring
-                val verified = connectControl(control, knownNames, ::progress, expectedSerial, registerPhone = registerOnFirstLink)
+                val verified = connectControl(control, knownNames, ::progress, expectedSerial, registered, registerPhone = registerOnFirstLink)
                 control = verified.connectedAddress
                 currentCoroutineContext().ensureActive()
                 val names = setOf(verified.cameraName, verified.serverName).filter(String::isNotBlank).toMutableSet()
@@ -98,8 +102,8 @@ internal class BluetoothPairingCoordinator(
                 pairedAddress = paired.address
                 if (!ble.state.value.authenticated || ble.state.value.connectedAddress != control) {
                     progress("系统配对已完成，正在重新发现 BLE 控制地址")
-                    control = ble.rediscover(names + paired.name.orEmpty(), control, serial ?: expectedSerial).address
-                    val restored = connectControl(control, names, ::progress, serial ?: expectedSerial)
+                    control = ble.rediscover(names + paired.name.orEmpty(), control, serial ?: expectedSerial, registered).address
+                    val restored = connectControl(control, names, ::progress, serial ?: expectedSerial, registered)
                     control = restored.connectedAddress
                     val restoredSerial = cameraSerial(restored.serialNumber)
                     serial = restoredSerial ?: serial
@@ -142,7 +146,7 @@ internal class BluetoothPairingCoordinator(
     }
 
     private suspend fun connectControl(address: String, names: Set<String>, progress: (String) -> Unit, expectedSerial: String?,
-        registerPhone: Boolean = false): BleState {
+        registered: Boolean, registerPhone: Boolean = false): BleState {
         var current = address
         var wakeAttempted = false
         for (attempt in 0..2) {
@@ -153,7 +157,7 @@ internal class BluetoothPairingCoordinator(
                     ble.wakeSleepingCamera(current)
                     delay(1000)
                     progress("正在重新发现已唤醒的相机")
-                    current = ble.rediscover(names, current, expectedSerial).address
+                    current = ble.rediscover(names, current, expectedSerial, registered, retryLastAddress = true).address
                 }
                 return ble.connect(current, preserveHistory = true, registerPhone = registerPhone, expectedSerial = expectedSerial).await()
             }
@@ -162,7 +166,7 @@ internal class BluetoothPairingCoordinator(
                 if (attempt == 2 || names.isEmpty() || !retryableBleFailure(error)) throw error
                 progress("控制连接中断，重新扫描后重试（${attempt + 2}/3）")
                 delay(1000L shl attempt)
-                current = ble.rediscover(names, current, expectedSerial).address
+                current = ble.rediscover(names, current, expectedSerial, registered, retryLastAddress = true).address
             }
         }
         error("BLE 控制连接未能建立")

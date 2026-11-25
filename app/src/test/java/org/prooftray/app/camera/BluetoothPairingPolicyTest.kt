@@ -56,6 +56,13 @@ class BluetoothPairingPolicyTest {
         assertTrue(initializeCameraPairing(explicitRequest = true, systemBondExists = true))
     }
 
+    @Test fun wifiAndClassicHandoffsReleaseGattExceptOnConcurrentModels() {
+        assertTrue(needsBluetoothHandoff(""))
+        assertTrue(needsBluetoothHandoff("Z 6_2"))
+        assertFalse(needsBluetoothHandoff("A900"))
+        assertFalse(needsBluetoothHandoff("KeyMission 80"))
+    }
+
     @Test fun anUnbondedCameraMustBeInitializedBeforeSystemPairing() {
         assertTrue(initializeCameraPairing(explicitRequest = false, systemBondExists = false))
     }

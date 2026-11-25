@@ -9,6 +9,7 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.net.wifi.WifiNetworkSpecifier
 import android.os.Build
@@ -25,6 +26,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -110,19 +112,31 @@ internal class CameraNetwork(context: Context, private val scope: CoroutineScope
     private fun matchingDhcpServer(props: LinkProperties): InetAddress? {
         // Android 10 exposes a global lease. Use it only when its client address is on this particular Network.
         val lease = wifiManager?.dhcpInfo ?: return null
-        fun ipv4(value: Int): InetAddress = InetAddress.getByAddress(ByteArray(4) { (value ushr (8 * it)).toByte() })
         return if (lease.serverAddress != 0 && props.linkAddresses.any { it.address == ipv4(lease.ipAddress) }) ipv4(lease.serverAddress) else null
     }
 
-    fun hotspotSecurity(ssid: String, bssid: String?): CameraWifiSecurity {
-        val scan = runCatching { wifiManager?.scanResults }.getOrNull()
-            ?.firstOrNull { it.SSID == ssid && (bssid == null || it.BSSID.equals(bssid, true)) }
-        val capabilities = scan?.capabilities.orEmpty()
-        return when {
-            "SAE" in capabilities && "PSK" in capabilities -> CameraWifiSecurity.WPA2_WPA3
-            "SAE" in capabilities -> CameraWifiSecurity.WPA3
-            else -> CameraWifiSecurity.WPA2
-        }
+    private fun ipv4(value: Int): InetAddress = InetAddress.getByAddress(ByteArray(4) { (value ushr (8 * it)).toByte() })
+
+    fun connectedSonyAp(targetSsid: String, targetBssid: String?): Network? {
+        fun WifiInfo.matches() = ssid == "\"$targetSsid\"" && (targetBssid == null || targetBssid.equals(bssid, true))
+        return try {
+            val routes = manager.allNetworks.mapNotNull { route ->
+                val capabilities = manager.getNetworkCapabilities(route) ?: return@mapNotNull null
+                if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                    return@mapNotNull null
+                }
+                // A local-only network's lifetime belongs to its request. Reacquire it if the previous session just released its callback.
+                if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return@mapNotNull null
+                route to (capabilities.transportInfo as? WifiInfo)
+            }
+            val matches = routes.filter { it.second?.matches() == true }
+            if (matches.isNotEmpty()) return matches.singleOrNull()?.first
+            // Older Android versions may only expose the current SSID through WifiManager.
+            val route = routes.singleOrNull()?.first ?: return null
+            val info = wifiManager?.connectionInfo ?: return null
+            val props = manager.getLinkProperties(route) ?: return null
+            route.takeIf { info.matches() && info.ipAddress != 0 && props.linkAddresses.any { it.address == ipv4(info.ipAddress) } }
+        } catch (_: SecurityException) { null }
     }
 
     fun checkApSecurity(security: CameraWifiSecurity) {
@@ -194,14 +208,11 @@ internal class CameraNetwork(context: Context, private val scope: CoroutineScope
 
     suspend fun findPairedSony(id: UUID): Pair<Network, String>? {
         val route = runCatching { wifi() }.getOrNull() ?: return null
-        var match: String? = null
-        try {
-            discoverSonyCameras(route) { host, udn ->
-                if (udn == id) match = host
-                udn == id
-            }
+        val camera = try {
+            // Two search rounds before asking the camera to switch on its hotspot.
+            withTimeoutOrNull(6000) { discoverSonyCameras(route).first { it.id == id } }
         } catch (_: IOException) { return null } catch (_: SecurityException) { return null }
-        return match?.let { route to it }
+        return camera?.let { route to it.host }
     }
 
     @Synchronized
@@ -210,7 +221,7 @@ internal class CameraNetwork(context: Context, private val scope: CoroutineScope
         mutableEndpoints.update { items ->
             val previous = items.firstOrNull { it.host == endpoint.host && it.port == endpoint.port }
             val merged = if (previous == null) endpoint else endpoint.copy(
-                name = if (endpoint.make == CameraMake.SONY) previous.name else endpoint.name,
+                name = if (previous.make == CameraMake.SONY && endpoint.make == CameraMake.OTHER) previous.name else endpoint.name,
                 make = if (endpoint.make == CameraMake.OTHER) previous.make else endpoint.make
             )
             (items.filterNot { it == previous } + merged).takeLast(30)
@@ -224,9 +235,8 @@ internal class CameraNetwork(context: Context, private val scope: CoroutineScope
         val generation = discoveryGeneration
         sonyDiscovery = scope.launch {
             try {
-                discoverSonyCameras(wifi()) { host, _ ->
-                    addEndpoint(generation, CameraEndpoint("Sony α", host, make = CameraMake.SONY))
-                    false
+                discoverSonyCameras(wifi()).collect { camera ->
+                    addEndpoint(generation, CameraEndpoint(camera.name, camera.host, make = CameraMake.SONY))
                 }
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
             catch (_: IOException) { /* The manual address field remains available on networks blocking SSDP. */ }

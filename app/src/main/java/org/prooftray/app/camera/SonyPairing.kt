@@ -11,16 +11,11 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
 import java.io.IOException
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withTimeoutOrNull
 import no.nordicsemi.android.ble.callback.FailCallback
-import no.nordicsemi.android.ble.exception.BluetoothDisabledException
-import no.nordicsemi.android.ble.exception.DeviceDisconnectedException
-import no.nordicsemi.android.ble.exception.InvalidRequestException
-import no.nordicsemi.android.ble.exception.RequestFailedException
 
 internal fun usesSonySystemPairing(sdk: Int, manufacturer: String): Boolean =
     sdk >= 37 || listOf("OPPO", "OnePlus", "realme").any { manufacturer.contains(it, ignoreCase = true) }
@@ -75,20 +70,4 @@ internal fun sonyGattFailure(operation: String, status: Int, connecting: Boolean
     val code = bluetoothGattCode(status)
     val reason = if (!connecting && status == 0x9d) "机身当前未接受此项请求" else bluetoothGattReason(status, connecting)
     return SonyBluetoothFailure("${operation}失败。$reason。", "$operation · $code", status, cause)
-}
-
-internal suspend fun <T> sonyGattRequest(operation: String, connecting: Boolean = false, block: suspend () -> T): T {
-    try { return block() }
-    catch (error: Exception) {
-        currentCoroutineContext().ensureActive()
-        val status = when (error) {
-            is RequestFailedException -> error.status
-            is DeviceDisconnectedException -> FailCallback.REASON_DEVICE_DISCONNECTED
-            is BluetoothDisabledException -> FailCallback.REASON_BLUETOOTH_DISABLED
-            is InvalidRequestException -> throw SonyBluetoothFailure("${operation}请求已失效，请重新连接。", "$operation · 蓝牙请求失效", cause = error)
-            is CancellationException -> FailCallback.REASON_CANCELLED
-            else -> throw error
-        }
-        throw sonyGattFailure(operation, status, connecting, error)
-    }
 }

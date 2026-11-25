@@ -10,10 +10,13 @@ import com.jcraft.jsch.UIKeyboardInteractive
 import com.jcraft.jsch.UserInfo
 import java.io.Closeable
 import java.io.DataInputStream
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import okio.AsyncTimeout
 import okio.buffer
@@ -25,15 +28,15 @@ internal class PtpPipe(input: InputStream, val output: OutputStream, val listenF
 
 /** Both PTP channels stay on the Android network the user selected, including the physical socket carrying SSH. */
 internal class PtpTransport(
-    private val network: Network?, private val host: String, private val port: Int, private val access: SonyAccess?
+    private val network: Network?, private val host: String, private val port: Int, private val access: SonyAccess?, private val dialAttempts: Int
 ) : Closeable {
     private val sockets = mutableListOf<Socket>()
-    private var closed = false
+    private val closed = CountDownLatch(1)
     private var ssh: Session? = null
 
     fun open(): PtpPipe {
         if (access == null) {
-            val socket = dial(port)
+            val socket = dial(port, dialAttempts)
             return PtpPipe(socket.getInputStream(), socket.getOutputStream()) { socket.soTimeout = 0 }
         }
         val session = ssh ?: authenticate(access)
@@ -46,16 +49,26 @@ internal class PtpTransport(
         return PtpPipe(input, output) { timeout.clearTimeout() }
     }
 
-    private fun dial(destination: Int): Socket {
-        val socket = synchronized(this) {
-            check(!closed) { "相机连接已取消" }
-            (network?.socketFactory?.createSocket() ?: Socket()).also(sockets::add)
-        }
+    private fun dial(destination: Int, attempts: Int = 1): Socket {
         val address = network?.getAllByName(host)?.firstOrNull()
-        socket.soTimeout = READ_TIMEOUT_MS
-        socket.tcpNoDelay = true
-        socket.connect(if (address == null) InetSocketAddress(host, destination) else InetSocketAddress(address, destination), CONNECT_TIMEOUT_MS)
-        return socket
+        val endpoint = if (address == null) InetSocketAddress(host, destination) else InetSocketAddress(address, destination)
+        var attempt = 0
+        while (true) {
+            val socket = synchronized(this) {
+                check(closed.count != 0L) { "相机连接已取消" }
+                (network?.socketFactory?.createSocket() ?: Socket()).also(sockets::add)
+            }
+            try {
+                socket.soTimeout = READ_TIMEOUT_MS
+                socket.tcpNoDelay = true
+                socket.connect(endpoint, CONNECT_TIMEOUT_MS)
+                return socket
+            } catch (error: IOException) {
+                synchronized(this) { sockets.remove(socket) }
+                runCatching { socket.close() }
+                if (++attempt >= attempts || error is SocketTimeoutException || closed.await(300, TimeUnit.MILLISECONDS)) throw error
+            }
+        }
     }
 
     private fun authenticate(credentials: SonyAccess): Session {
@@ -71,7 +84,7 @@ internal class PtpTransport(
             override fun getHostKey(host: String?, type: String?): Array<HostKey> = emptyArray()
         }
         val session = client.getSession(credentials.user, host, 22)
-        synchronized(this) { check(!closed) { "相机连接已取消" }; ssh = session }
+        synchronized(this) { check(closed.count != 0L) { "相机连接已取消" }; ssh = session }
         session.setSocketFactory(object : SocketFactory {
             override fun createSocket(name: String, port: Int): Socket = dial(port)
             override fun getInputStream(socket: Socket): InputStream = socket.getInputStream()
@@ -101,8 +114,8 @@ internal class PtpTransport(
 
     override fun close() {
         val session = synchronized(this) {
-            if (closed) return
-            closed = true
+            if (closed.count == 0L) return
+            closed.countDown()
             sockets.forEach { runCatching { it.close() } }
             sockets.clear()
             ssh.also { ssh = null }

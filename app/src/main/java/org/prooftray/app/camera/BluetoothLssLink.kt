@@ -64,15 +64,14 @@ internal class BluetoothLssLink(context: Context, private val address: String, p
     fun connect(identity: ByteArray) {
         require(identity.size == 8)
         check(adapter != null && adapter.isEnabled) { "手机蓝牙未开启" }
-        val alarm = timeout.schedule({ close() }, 25, TimeUnit.SECONDS)
         try {
             val connection = if (role == BluetoothRole.WAIT_FOR_CAMERA) {
                 val listener = server ?: error("蓝牙监听尚未准备好")
-                try { listener.accept(20000) } finally { listener.close(); server = null }
+                try { listener.accept(30_000) } finally { listener.close(); server = null }
             } else {
                 clientSocket(adapter.getRemoteDevice(address)).also {
                     socket = it
-                    it.connect()
+                    withSocketDeadline { it.connect() }
                 }
             }
             socket = connection
@@ -81,11 +80,15 @@ internal class BluetoothLssLink(context: Context, private val address: String, p
             Log.i("ProofTray.Bluetooth", "RFCOMM connected; role=$role")
             input = DataInputStream(connection.inputStream)
             val start = ByteArray(17).also { SecureRandom().nextBytes(it); it[0] = 1; identity.copyInto(it, 9) }
-            sendAuthentication(1, start.copyOfRange(1, 17))
-            val challenge = readAuthentication(2)
+            val challenge = withSocketDeadline {
+                sendAuthentication(1, start.copyOfRange(1, 17))
+                readAuthentication(2)
+            }
             val response = NativePtp.pairReply(start, byteArrayOf(2) + challenge)
-            sendAuthentication(3, ByteArray(8) + response.copyOfRange(9, 17))
-            readAuthentication(4)
+            withSocketDeadline {
+                sendAuthentication(3, ByteArray(8) + response.copyOfRange(9, 17))
+                readAuthentication(4)
+            }
             Log.i("ProofTray.Bluetooth", "Bluetooth data authentication complete")
             check(!closed) { "蓝牙传图连接已超时" }
             Thread({ readResponses() }, "ProofTray-BT-data").apply { isDaemon = true; start() }
@@ -94,11 +97,18 @@ internal class BluetoothLssLink(context: Context, private val address: String, p
             operations = (0 until values.length()).map { values.getInt(it) }.toSet()
             command(0x1002, longArrayOf(1))
             sessionOpened = true
+            transaction = 1
+            operations = nikonOperations(operations) { op, params -> command(op, params) }
             Log.i("ProofTray.Bluetooth", "Bluetooth PTP session opened")
         } catch (error: Exception) {
             close()
             throw IOException("蓝牙传图通道建立失败：${error.message}", error)
-        } finally { alarm.cancel(false) }
+        }
+    }
+
+    private inline fun <T> withSocketDeadline(block: () -> T): T {
+        val alarm = timeout.schedule({ close() }, 30, TimeUnit.SECONDS)
+        try { return block() } finally { alarm.cancel(false) }
     }
 
     private fun clientSocket(device: BluetoothDevice): BluetoothSocket {
@@ -165,7 +175,8 @@ internal class BluetoothLssLink(context: Context, private val address: String, p
     @Synchronized
     private fun command(operation: Int, parameters: LongArray = longArrayOf(), timeoutSeconds: Long = 30): ByteArray {
         check(!closed && parameters.size <= 5) { "蓝牙传图会话已关闭" }
-        val id = transaction++
+        val id = transaction
+        if (transaction != 0L) transaction++
         val pending = Reply(operation, id)
         reply = pending
         var alarm: ScheduledFuture<*>? = null
@@ -215,7 +226,7 @@ internal class BluetoothLssLink(context: Context, private val address: String, p
                     current.continuation = frame.flag != 1
                 } else {
                     check(type == 3 && size == frame.payload.size.toLong()) { "蓝牙 PTP 响应无效" }
-                    if (code != 0x2001) {
+                    if (code != 0x2001 && !nikonSessionAlreadyOpen(current.operation, code)) {
                         current.result.completeExceptionally(PtpResponseException(current.operation, code, current.bytes.size().toLong()))
                     }
                     else {

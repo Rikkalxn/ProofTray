@@ -93,7 +93,8 @@ internal class CameraAutomation(
             }.distinctUntilChanged()
             val control = combine(host.ble.state, bluetoothHandoff, standbyAllowed) { current, handoff, allowed ->
                 handoff?.copy(wifiRequested = current.wifiRequested, allowReconnect = allowed, adapterEnabled = current.adapterEnabled)
-                    ?: BleControl(current.dataReady, current.connectedAddress, current.wifiRequested, allowed, current.adapterEnabled, current.scanning)
+                    ?: BleControl(current.dataReady, current.connectedAddress, current.wifiRequested, allowed,
+                        current.adapterEnabled, current.scanning)
             }
                 .distinctUntilChanged()
             combine(policy, connection, control) { value, wifi, ble ->
@@ -329,14 +330,16 @@ internal class CameraAutomation(
         val intent = transferIntent.get()
         val retryEpoch = retryVersion.get()
         setTransferring(true)
+        val releaseControl = needsBluetoothHandoff(control.modelNumber)
         var handedOff = false
         try {
             progress("正在建立蓝牙数据通道并读取待传列表")
             connection.prepare()
+            // The peer may drop GATT immediately after it acknowledges the change of radio.
+            if (releaseControl) bluetoothHandoff.value = BleControl(true, control.connectedAddress, false)
             host.ble.requestBluetoothTransfer()
             currentCoroutineContext().ensureActive()
-            if (needsBluetoothHandoff(setOf(control.cameraName, control.serverName))) {
-                bluetoothHandoff.value = BleControl(true, control.connectedAddress, false)
+            if (releaseControl) {
                 handedOff = true
                 Log.i("ProofTray.Bluetooth", "handing BLE control over to classic data connection")
                 host.ble.disconnectForHandoff(control.connectedAddress)
@@ -419,7 +422,7 @@ internal class CameraAutomation(
             catch (error: Exception) { Log.w("ProofTray.Bluetooth", "BLE standby recovery failed", error) }
             finally {
                 bluetooth.compareAndSet(active, null)
-                if (handedOff) bluetoothHandoff.value = null
+                if (releaseControl) bluetoothHandoff.value = null
                 setTransferring(false)
                 if (wake.isHeld) wake.release()
             }

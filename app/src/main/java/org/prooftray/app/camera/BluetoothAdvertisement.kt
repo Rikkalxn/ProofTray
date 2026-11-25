@@ -13,11 +13,13 @@ internal fun bluetoothScanFailure(code: Int): String {
     return "$reason（Android 扫描码 $code）"
 }
 
-// Android removes the company ID; an LSS payload contains four client-ID bytes and one advertisement flag byte.
-internal fun advertisementFlags(payloads: List<ByteArray>): Int? {
-    val candidates = payloads.filter { it.size == 5 }.map { it[4].toInt() and 255 }.distinct()
-    return candidates.singleOrNull()
-}
+internal data class NikonAdvertisement(val clientId: Int, val flags: Int)
+
+// The first four identity bytes are sent in the same order in the manufacturer record and the LSS handshake.
+internal fun nikonClientId(bytes: ByteArray): Int = java.nio.ByteBuffer.wrap(bytes).int
+
+internal fun nikonAdvertisement(payloads: List<ByteArray>): NikonAdvertisement? = payloads.filter { it.size >= 5 }
+    .map { NikonAdvertisement(nikonClientId(it), it[4].toInt() and 255) }.distinct().singleOrNull()
 
 internal fun advertisementHasTransfers(flags: Int?): Boolean = flags != null && flags and 2 != 0
 
