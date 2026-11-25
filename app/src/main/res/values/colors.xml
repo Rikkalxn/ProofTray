@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="launcher_background">#50379B</color>
-    <color name="brand_mint">#BEECDD</color>
+    <color name="launcher_background">#14161B</color>
+    <color name="brand_paper">#F4EFE6</color>
+    <color name="brand_orange">#FF5A36</color>
+    <color name="brand_slate">#626B7A</color>
+    <color name="brand_graphite">#2E323C</color>
 </resources>

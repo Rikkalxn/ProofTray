@@ -1,12 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="24dp" android:height="24dp" android:viewportWidth="72" android:viewportHeight="72">
-    <group android:translateX="-18" android:translateY="-18">
-        <path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="7"
-            android:strokeLineCap="round" android:strokeLineJoin="round"
-            android:pathData="M64,30H41C34.925,30 30,34.925 30,41V67C30,73.075 34.925,78 41,78H67C73.075,78 78,73.075 78,67V55" />
-        <path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="6"
-            android:strokeLineCap="round" android:pathData="M37,65C41,54 47,49 54,49C61,49 67,54 71,65M36,65H72" />
-        <path android:fillColor="#FFFFFF" android:pathData="M73,31.5A4.5,4.5 0,1 0,73 40.5A4.5,4.5 0,1 0,73 31.5Z" />
+    android:width="24dp" android:height="24dp" android:viewportWidth="54" android:viewportHeight="54">
+    <group android:translateX="-9" android:translateY="-9">
+        <path android:fillColor="#FFFFFF" android:pathData="M16.24,24.02L26.69,22.36 23.71,36.4A4.5,4.5 0,0 0,27.17 41.74L30.28,42.4H16.62
+            L14.16,26.88A2.5,2.5 0,0 1,16.24 24.02Z" />
+        <group>
+            <!-- Leave a clear gap between the paper and the tray when both use the system tint. -->
+            <clip-path android:pathData="M0,0H72V42.4H50.6C48.7,42.4 47.5,43.3 46.7,44.7C45.7,46.4 44.2,47.2 41.9,47.2
+                S38.1,46.4 37.1,44.7C36.3,43.3 35.1,42.4 33.2,42.4H0Z" />
+            <group android:rotation="12" android:pivotX="41" android:pivotY="32">
+                <clip-path android:fillType="evenOdd" android:pathData="M0,0V72H72V0ZM30.3,32.8C32.96,32.59 34.81,31.48 36.48,30.08
+                    A4.6,4.6 0,1 1,42.09 25.27C44.86,23.33 48.06,21.85 51.9,21.4V38.2H30.3Z" />
+                <path android:pathData="@string/icon_print_path" android:fillColor="#FFFFFF" />
+            </group>
+        </group>
+        <path android:pathData="@string/icon_tray_path" android:fillColor="#FFFFFF" />
     </group>
 </vector>

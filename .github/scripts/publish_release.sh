@@ -36,9 +36,7 @@ if [[ "$NEW_VERSION" == true ]]; then
 fi
 
 if [[ -z "$state" ]]; then
-  notes="$RUNNER_TEMP/prooftray-release-notes.md"
-  sed -e "s|{{repository_url}}|$repository_url|g" -e "s|{{version}}|$VERSION|g" .github/release-notes.md > "$notes"
-  gh release create "$tag" --verify-tag --draft --title "ProofTray $VERSION" --notes-file "$notes" --generate-notes
+  gh release create "$tag" --verify-tag --draft --title "ProofTray $VERSION" --notes ""
 fi
 gh release upload "$tag" "$apk" "$source_archive" --clobber
 release_id=$(gh release view "$tag" --json databaseId --jq .databaseId)

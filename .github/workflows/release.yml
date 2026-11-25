@@ -76,7 +76,7 @@ jobs:
             --v4-signing-enabled false --out "$apk" "$RUNNER_TEMP/prooftray-aligned.apk"
           apksigner verify "$apk"
 
-      - name: Publish version, source and release notes
+      - name: Publish signed APK and source archive
         if: steps.version.outputs.version != ''
         env:
           GH_TOKEN: ${{ github.token }}
