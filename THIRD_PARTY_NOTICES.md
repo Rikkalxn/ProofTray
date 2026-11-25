@@ -3,7 +3,8 @@
 ProofTray's original code and documentation are licensed under the [Apache License, Version 2.0](LICENSE).
 Third-party components retain the terms and copyright notices listed below. The Android build collects these notices
 under `assets/licenses/`. They are available offline in Settings → About → Open source and licenses.
-The CI debug package includes the same notices and a source archive containing the pinned native dependencies and build adapters.
+GitHub releases include the signed APK and a source archive with the pinned native dependencies and build adapters.
+The CI debug package also includes the notices extracted from its APK.
 
 ## furble
 

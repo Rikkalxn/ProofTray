@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prooftray-release
+  queue: max
+
+jobs:
+  release:
+    name: Publish signed Android APK
+    if: github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out release source and tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Prepare release version
+        id: version
+        env:
+          SIGNING_CONFIGURED: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' && secrets.ANDROID_KEYSTORE_PASSWORD != '' }}
+        run: |
+          if [[ "$SIGNING_CONFIGURED" != true ]]; then
+            echo "::error::Configure ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD with the existing release key."
+            exit 1
+          fi
+          python3 .github/scripts/prepare_release.py
+
+      - name: Set up Android build tools
+        uses: ./.github/actions/setup-android
+
+      - name: Build Release APK
+        run: ./gradlew --no-daemon --stacktrace :app:assembleRelease
+
+      - name: Verify version and sign APK
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          VERSION_CODE: ${{ steps.version.outputs.code }}
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          apk_dir=app/build/outputs/apk/release
+          filename=$(jq -er --arg version "$VERSION" --argjson code "$VERSION_CODE" '
+            select(.applicationId == "org.openbridge.app" and (.elements | length) == 1)
+            | .elements[0] | select(.versionName == $version and .versionCode == $code) | .outputFile
+          ' "$apk_dir/output-metadata.json")
+          out="$RUNNER_TEMP/prooftray-release"
+          mkdir -p "$out"
+          umask 077
+          key=$(mktemp "$RUNNER_TEMP/prooftray-key.XXXXXXXX")
+          trap 'rm -f -- "$key"' EXIT
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$key"
+          unset KEYSTORE_BASE64
+          zipalign -P 16 -f 4 "$apk_dir/$filename" "$RUNNER_TEMP/prooftray-aligned.apk"
+          apk="$out/ProofTray-$VERSION-release.apk"
+          apksigner sign --ks "$key" --ks-key-alias openbridge --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEYSTORE_PASSWORD \
+            --v4-signing-enabled false --out "$apk" "$RUNNER_TEMP/prooftray-aligned.apk"
+          apksigner verify "$apk"
+
+      - name: Publish version, source and release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+        run: bash .github/scripts/publish_release.sh
