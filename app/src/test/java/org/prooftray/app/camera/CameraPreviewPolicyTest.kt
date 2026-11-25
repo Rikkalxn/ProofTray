@@ -30,7 +30,7 @@ class CameraPreviewPolicyTest {
         assertTrue(grid.single { it.operation == GET_LSS_IMAGE }.parameters(42).contentEquals(longArrayOf(42, 1, 0)))
         assertTrue(detail.single { it.operation == GET_LSS_IMAGE }.parameters(42).contentEquals(longArrayOf(42, 3, 0)))
         assertEquals(GET_LARGE_THUMB, grid.first().operation)
-        assertEquals(GET_LARGE_THUMB, detail.first().operation)
+        assertEquals(GET_LSS_IMAGE, detail.first().operation)
     }
 
     @Test fun successfulTinyImageStillNeedsAnUpgrade() {

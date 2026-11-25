@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="icon_print_path" translatable="false">M29.5,13.2H52.7a2.5,2.5 0,0 1,2.5 2.5v24.2a2.5,2.5 0,0 1,-2.5 2.5H29.5
-        a2.5,2.5 0,0 1,-2.5 -2.5V15.7a2.5,2.5 0,0 1,2.5 -2.5Z</string>
-    <string name="icon_tray_path" translatable="false">M13.5,44.4H33.2C34.3,44.4 34.9,44.8 35.4,45.7C36.7,48 38.8,49.2 41.9,49.2
-        S47.1,48 48.4,45.7C48.9,44.8 49.5,44.4 50.6,44.4H58.5Q60,44.4 60,45.9V51.6Q60,57.5 54.1,57.5H17.9Q12,57.5 12,51.6V45.9
-        Q12,44.4 13.5,44.4Z</string>
-</resources>

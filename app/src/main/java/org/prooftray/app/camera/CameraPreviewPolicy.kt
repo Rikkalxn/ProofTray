@@ -17,7 +17,7 @@ internal data class CameraPreview(val bytes: ByteArray, val dimensions: PreviewD
 internal fun previewCommands(detailed: Boolean, advertised: Set<Int>, nikon: Boolean, rejected: Set<Int>): List<PreviewCommand> {
     if (!nikon) return listOf(PreviewCommand(GET_THUMB)).filterNot { it.operation in rejected }
     val portable = PreviewCommand(GET_LSS_IMAGE, if (detailed) 3 else 1) // FULL_HD / VGA, supplied by the camera.
-    val candidates = if (detailed) listOf(PreviewCommand(GET_LARGE_THUMB), PreviewCommand(GET_FHD_PICTURE), portable)
+    val candidates = if (detailed) listOf(portable, PreviewCommand(GET_LARGE_THUMB), PreviewCommand(GET_FHD_PICTURE))
         else listOf(PreviewCommand(GET_LARGE_THUMB), portable, PreviewCommand(GET_FHD_PICTURE))
     return (candidates + PreviewCommand(GET_THUMB)).filter {
         it.operation !in rejected && (it.operation == GET_THUMB || it.operation in advertised || (nikon && it.operation == GET_LARGE_THUMB))

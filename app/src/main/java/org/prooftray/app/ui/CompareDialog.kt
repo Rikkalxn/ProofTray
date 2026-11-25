@@ -109,9 +109,10 @@ fun PhotoViewer(
     versionCount: (PhotoAsset) -> Int, onShowVersions: (PhotoAsset) -> Unit, onPromote: ((PhotoAsset) -> Unit)?,
     onDismiss: () -> Unit
 ) {
-    val pager = rememberPagerState(initialPage = assets.indexOfFirst { it.id == startId }.coerceAtLeast(0)) { assets.size }
-    var zoomed by remember { mutableStateOf(false) }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        // The camera catalog can change while the dialog is open. Update page count and content in the same composition.
+        val pager = rememberPagerState(initialPage = assets.indexOfFirst { it.id == startId }.coerceAtLeast(0)) { assets.size }
+        var zoomed by remember { mutableStateOf(false) }
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.safeDrawingPadding()) {
                 val current = assets.getOrNull(pager.currentPage)
@@ -131,8 +132,10 @@ fun PhotoViewer(
                     }
                 }
                 Box(Modifier.weight(1f).fillMaxWidth().background(Color.Black)) {
-                    HorizontalPager(pager, Modifier.fillMaxSize(), userScrollEnabled = !zoomed, key = { assets[it].id }) { page ->
-                        ZoomablePhoto(assets[page]) { if (page == pager.currentPage) zoomed = it }
+                    HorizontalPager(pager, Modifier.fillMaxSize(), userScrollEnabled = !zoomed,
+                        key = { page -> assets.getOrNull(page)?.id ?: page }) { page ->
+                        val asset = assets.getOrNull(page) ?: return@HorizontalPager
+                        ZoomablePhoto(asset) { if (page == pager.currentPage) zoomed = it }
                     }
                 }
                 if (current != null) {

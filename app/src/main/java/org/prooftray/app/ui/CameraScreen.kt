@@ -51,6 +51,7 @@ internal fun CameraScreen(
     modifier: Modifier = Modifier, initialPanel: CameraPanel? = null
 ) {
     var panel by rememberSaveable { mutableStateOf(initialPanel) }
+    var manualMode by rememberSaveable { mutableStateOf(CameraMode.AP) }
     var menu by remember { mutableStateOf(false) }
     fun openPanel(next: CameraPanel?) {
         menu = false
@@ -88,7 +89,10 @@ internal fun CameraScreen(
                                 else -> null
                             }
                             ConnectionMenuItem("添加或切换相机", changeReason) { openPanel(CameraPanel.SEARCH) }
-                            ConnectionMenuItem("手动连接 Wi-Fi", "等待当前连接操作完成".takeIf { summary.busy }) { openPanel(CameraPanel.MANUAL) }
+                            ConnectionMenuItem("手动连接相机热点", "等待当前连接操作完成".takeIf { summary.busy }) {
+                                manualMode = CameraMode.AP
+                                openPanel(CameraPanel.MANUAL)
+                            }
                             DropdownMenuItem(text = { Text("连接诊断") }, onClick = { openPanel(CameraPanel.DIAGNOSTICS) })
                         }
                     }
@@ -113,6 +117,18 @@ internal fun CameraScreen(
                         performCameraAction(primary.action, actions, onBrowse, ::openPanel)
                     }, enabled = primary.action != CameraAction.NONE, modifier = Modifier.fillMaxWidth(), glyph = primary.glyph)
                 }
+                val lanOpen = panel == CameraPanel.MANUAL && manualMode == CameraMode.STA
+                OutlinedButton(onClick = {
+                    if (lanOpen) openPanel(null) else {
+                        manualMode = CameraMode.STA
+                        openPanel(CameraPanel.MANUAL)
+                        actions.onDiscoverCamera()
+                    }
+                }, enabled = !summary.busy, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (lanOpen) "收起局域网连接" else "通过同一局域网连接")
+                }
+                ManualConnection(state, actions, visible = panel == CameraPanel.MANUAL, mode = manualMode,
+                    onModeChange = { manualMode = it }, onRegister = onRegister)
                 if (nikon) {
                     val wifi = state.camera.connected
                     val bluetooth = state.ble.authenticated && state.ble.systemPaired && !state.ble.pairingInProgress
@@ -174,7 +190,6 @@ internal fun CameraScreen(
                 }
             }
         }
-        item { ManualConnection(state, actions, visible = panel == CameraPanel.MANUAL, onRegister = onRegister) }
         item {
             AnimatedVisibility(panel == CameraPanel.DIAGNOSTICS) {
                 SectionCard("连接诊断", glyph = AppGlyph.SETTINGS) {
@@ -228,8 +243,8 @@ private fun ConnectionMenuItem(title: String, disabledReason: String?, onClick: 
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ManualConnection(state: LibraryUiState, actions: LibraryActions, visible: Boolean, onRegister: () -> Unit) {
-    var modeIndex by rememberSaveable { mutableStateOf(0) }
+private fun ManualConnection(state: LibraryUiState, actions: LibraryActions, visible: Boolean, mode: CameraMode,
+    onModeChange: (CameraMode) -> Unit, onRegister: () -> Unit) {
     var apHost by rememberSaveable { mutableStateOf("") }
     var staHost by rememberSaveable { mutableStateOf("") }
     var discoveredSonyHost by rememberSaveable { mutableStateOf("") }
@@ -244,15 +259,14 @@ private fun ManualConnection(state: LibraryUiState, actions: LibraryActions, vis
     val access = remember(manualAuth, user, secret, fingerprint) {
         if (manualAuth) runCatching { SonyAccess(user.trim(), secret, fingerprint) }.getOrNull() else null
     }
-    val mode = if (modeIndex == 0) CameraMode.AP else CameraMode.STA
     val host = if (mode == CameraMode.AP) apHost else staHost
     val portNumber = port.toIntOrNull()
     val enabled = !state.camera.connecting && !state.ble.pairingInProgress
     AnimatedVisibility(visible) {
         SectionCard("手动连接", glyph = AppGlyph.WIFI) {
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                listOf("相机热点", "同一局域网").forEachIndexed { index, label ->
-                    SegmentedButton(selected = modeIndex == index, onClick = { modeIndex = index }, enabled = enabled,
+                listOf(CameraMode.AP to "相机热点", CameraMode.STA to "同一局域网").forEachIndexed { index, (option, label) ->
+                    SegmentedButton(selected = mode == option, onClick = { onModeChange(option) }, enabled = enabled,
                         shape = SegmentedButtonDefaults.itemShape(index, 2)) { Text(label) }
                 }
             }

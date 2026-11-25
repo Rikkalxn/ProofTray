@@ -11,9 +11,12 @@
             <group android:rotation="12" android:pivotX="41" android:pivotY="32">
                 <clip-path android:fillType="evenOdd" android:pathData="M0,0V72H72V0ZM30.3,32.8C32.96,32.59 34.81,31.48 36.48,30.08
                     A4.6,4.6 0,1 1,42.09 25.27C44.86,23.33 48.06,21.85 51.9,21.4V38.2H30.3Z" />
-                <path android:pathData="@string/icon_print_path" android:fillColor="#FFFFFF" />
+                <path android:fillColor="#FFFFFF" android:pathData="M29.5,13.2H52.7a2.5,2.5 0,0 1,2.5 2.5v24.2a2.5,2.5 0,0 1,-2.5 2.5H29.5
+                    a2.5,2.5 0,0 1,-2.5 -2.5V15.7a2.5,2.5 0,0 1,2.5 -2.5Z" />
             </group>
         </group>
-        <path android:pathData="@string/icon_tray_path" android:fillColor="#FFFFFF" />
+        <path android:fillColor="#FFFFFF" android:pathData="M13.5,44.4H33.2C34.3,44.4 34.9,44.8 35.4,45.7C36.7,48 38.8,49.2 41.9,49.2
+            S47.1,48 48.4,45.7C48.9,44.8 49.5,44.4 50.6,44.4H58.5Q60,44.4 60,45.9V51.6Q60,57.5 54.1,57.5H17.9Q12,57.5 12,51.6V45.9
+            Q12,44.4 13.5,44.4Z" />
     </group>
 </vector>
