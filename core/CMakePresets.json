@@ -10,7 +10,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "OPENBRIDGE_BUILD_TESTS": "ON"
+        "PROOFTRAY_BUILD_TESTS": "ON"
       }
     }
   ],

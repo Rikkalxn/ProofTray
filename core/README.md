@@ -34,7 +34,7 @@ Android adapter:
 - Keep the native method name if code shrinking is enabled in a future release.
 
 `tests/catalog_test.cc` contains regression cases for missing metadata, range boundaries, combined filters, conservative grouping and invalid inputs.
-Desktop tests are enabled by default through `OPENBRIDGE_BUILD_TESTS`. This directory can be opened independently in CLion.
+Desktop tests are enabled by default through `PROOFTRAY_BUILD_TESTS`. This directory can be opened independently in CLion.
 From the repository root, a standalone desktop checkout can use:
 
 ```sh
@@ -44,7 +44,7 @@ ctest --test-dir out/core -C Debug --output-on-failure
 ```
 
 The optional presets are `core-debug` for this directory and `host-debug` for the parent project.
-Configure the parent with `OPENBRIDGE_BUILD_TIFF_TESTS=ON` to include Log TIFF readback tests. This requires zlib and the libtiff submodule.
+Configure the parent with `PROOFTRAY_BUILD_TIFF_TESTS=ON` to include Log TIFF readback tests. This requires zlib and the libtiff submodule.
 The desktop target names and CMake options retain their published names for existing toolchains and CLion run configurations.
 
 Color processing:
@@ -56,7 +56,7 @@ Color processing:
 - The versioned little-endian LUT binary stores dimensions, domain and floats; titles and attribution live in Android metadata.
 - `tests/color_lut_test.cc` adds malformed input, interpolation, binary round-trip, Hald ordering and alpha/stride regressions.
 - `include/prooftray/linear_raw.h` shares the LibRaw raster adapter between Android JNI and `tools/nlog_probe.cc`.
-  Configure the parent with `OPENBRIDGE_BUILD_NLOG_PROBE=ON` to build the optional desktop probe.
+  Configure the parent with `PROOFTRAY_BUILD_NLOG_PROBE=ON` to build the optional desktop probe.
 
 Location protocol:
 

@@ -7,7 +7,7 @@
 
 `upstream/` is a Git submodule pinned to this unmodified upstream commit, including its licenses, notices and build sources.
 The surrounding CMake file is ProofTray's build adapter. Its source list comes from upstream `Makefile.am`.
-The library is built separately as `libopenbridge_libraw.so`, dynamically linked by `libprooftray_raw.so`.
+The library is built separately as `libprooftray_libraw.so`, dynamically linked by `libprooftray_raw.so`.
 
 The previous 0.22.3 release does not contain Sony ILCE-7M5 support. This revision includes upstream change
 [`8eb34338`](https://github.com/LibRaw/LibRaw/commit/8eb3433879bddceb5c0098281c2f855bd9115e0c):

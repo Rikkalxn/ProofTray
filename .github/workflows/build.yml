@@ -75,7 +75,7 @@ jobs:
       - name: Configure C++ core
         run: >-
           cmake -S . -B out/build/ci-core -G Ninja -DCMAKE_BUILD_TYPE=Debug
-          -DOPENBRIDGE_BUILD_TESTS=ON -DOPENBRIDGE_BUILD_TIFF_TESTS=ON
+          -DPROOFTRAY_BUILD_TESTS=ON -DPROOFTRAY_BUILD_TIFF_TESTS=ON
 
       - name: Build C++ core
         run: cmake --build out/build/ci-core --parallel 2
