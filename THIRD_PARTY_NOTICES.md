@@ -28,6 +28,19 @@ LibRaw is a separate shared library. Initialize submodules to obtain the full pi
 ProofTray's JNI adapter and CMake configuration. Source distributions must include the submodule contents.
 Rebuild/replacement instructions and optional codec exclusions are in `third_party/libraw/README.md`.
 
+## HEIF and HEVC decoding
+
+Camera HEIF decoding uses the following unmodified libraries under LGPL-3.0-or-later.
+
+- [libheif 1.23.7](https://github.com/strukturag/libheif/tree/12a259a5882dd99d45ec5fc77e296a3b620d1e2e), copyright Dirk Farin and contributors.
+- [libde265 1.1.3](https://github.com/strukturag/libde265/tree/ba62bf4cfb3242f3bf0a45617ff09e35236e4d82),
+  copyright struktur AG, Dirk Farin and contributors.
+
+The APK carries the full upstream notices in `assets/licenses/libheif-COPYING.txt` and `assets/licenses/libde265-COPYING.txt`.
+Source archives include both pinned submodules and the CMake adapter in `third_party/heif`.
+For a replacement build, update the respective submodule source and rebuild the APK with the project's Gradle wrapper.
+The Android binaries are separate shared libraries named `libprooftray_heif_codec.so` and `libprooftray_de265.so`.
+
 ## libtiff
 
 16-bit Log TIFF export uses [libtiff 4.7.2](https://gitlab.com/libtiff/libtiff/-/tree/v4.7.2),

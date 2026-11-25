@@ -9,7 +9,6 @@ import android.graphics.Matrix
 import android.net.Uri
 import androidx.exifinterface.media.ExifInterface
 import java.io.File
-import java.io.InputStream
 import org.prooftray.app.domain.PhotoAsset
 import org.prooftray.app.domain.PreviewDimensions
 
@@ -18,9 +17,15 @@ internal data class LoadedPhotoPreview(val bitmap: Bitmap, val origin: PreviewOr
 
 internal data class PreviewImageInfo(val dimensions: PreviewDimensions, val mimeType: String, val cameraColorSpace: Int = 0) {
     companion object {
-        fun read(bytes: ByteArray): PreviewImageInfo? = probe { BitmapFactory.decodeByteArray(bytes, 0, bytes.size, it) }
-        fun read(file: File): PreviewImageInfo? = probe { BitmapFactory.decodeFile(file.absolutePath, it) }
-        fun read(stream: InputStream): PreviewImageInfo? = probe { BitmapFactory.decodeStream(stream, null, it) }
+        fun read(bytes: ByteArray): PreviewImageInfo? =
+            probe { BitmapFactory.decodeByteArray(bytes, 0, bytes.size, it) } ?: HeifBitmapDecoder.probe(bytes)
+
+        fun read(file: File): PreviewImageInfo? =
+            probe { BitmapFactory.decodeFile(file.absolutePath, it) } ?: HeifBitmapDecoder.probe(file)
+
+        fun read(context: Context, uri: Uri): PreviewImageInfo? = probe { options ->
+            context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
+        } ?: HeifBitmapDecoder.probe(context, uri)
 
         private fun probe(read: (BitmapFactory.Options) -> Unit): PreviewImageInfo? {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -46,8 +51,7 @@ internal data class PreviewCandidate(val input: PreviewInput, val info: PreviewI
     companion object {
         fun fromUri(context: Context, uri: String, origin: PreviewOrigin): PreviewCandidate? {
             val source = Uri.parse(uri)
-            val info = try { context.contentResolver.openInputStream(source)?.use { PreviewImageInfo.read(it) } }
-                catch (_: Exception) { null }
+            val info = try { PreviewImageInfo.read(context, source) } catch (_: Exception) { null }
             return info?.let { PreviewCandidate(PreviewInput.ImageUri(source), it, origin) }
         }
     }
@@ -55,7 +59,8 @@ internal data class PreviewCandidate(val input: PreviewInput, val info: PreviewI
 
 /** Source acquisition is separate: this decoder applies one orientation and one bounded resize to every preview. */
 internal object PreviewBitmapDecoder {
-    fun decode(context: Context, candidate: PreviewCandidate, asset: PhotoAsset, original: SourceOrientation?, edge: Int): LoadedPhotoPreview? {
+    suspend fun decode(context: Context, candidate: PreviewCandidate, asset: PhotoAsset, original: SourceOrientation?,
+        edge: Int): LoadedPhotoPreview? {
         val input = candidate.input
         val info = candidate.info
         val dimensions = info.dimensions
@@ -64,15 +69,18 @@ internal object PreviewBitmapDecoder {
         while (sample < 65536 && dimensions.longestEdge / (sample * 2) >= edge) sample *= 2
         while (dimensions.width.toLong() / sample * (dimensions.height / sample) > budget && sample < 65536) sample *= 2
         val options = BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 }
-        val heif = input is PreviewInput.ImageUri && info.mimeType.startsWith("image/hei")
+        val heif = info.mimeType.startsWith("image/hei")
         val resolver = context.contentResolver
         val decoded = when (input) {
             is PreviewInput.Thumbnail -> if (input.compressed) BitmapFactory.decodeByteArray(input.bytes, 0, input.bytes.size, options)
                 else decodeRgbThumbnail(input.bytes, dimensions.width, dimensions.height)
             is PreviewInput.ImageUri -> if (heif) {
-                ImageDecoder.decodeBitmap(ImageDecoder.createSource(resolver, input.uri)) { decoder, _, _ ->
-                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                    decoder.setTargetSampleSize(sample)
+                val target = minOf(edge, (dimensions.longestEdge / sample).coerceAtLeast(1))
+                HeifBitmapDecoder.decode(context, input.uri, target, budget, allowThumbnail = true) {
+                    ImageDecoder.decodeBitmap(ImageDecoder.createSource(resolver, input.uri)) { decoder, _, _ ->
+                        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                        decoder.setTargetSampleSize(sample)
+                    }
                 }
             } else resolver.openInputStream(input.uri)?.use { BitmapFactory.decodeStream(it, null, options) }
         } ?: return null

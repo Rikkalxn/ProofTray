@@ -4,3 +4,9 @@
 [submodule "libtiff"]
 	path = third_party/libtiff/upstream
 	url = https://gitlab.com/libtiff/libtiff.git
+[submodule "libheif"]
+	path = third_party/heif/libheif
+	url = https://github.com/strukturag/libheif.git
+[submodule "libde265"]
+	path = third_party/heif/libde265
+	url = https://github.com/strukturag/libde265.git

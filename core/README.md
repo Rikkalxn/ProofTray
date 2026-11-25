@@ -47,6 +47,11 @@ The optional presets are `core-debug` for this directory and `host-debug` for th
 Configure the parent with `PROOFTRAY_BUILD_TIFF_TESTS=ON` to include Log TIFF readback tests. This requires zlib and the libtiff submodule.
 The desktop target names and CMake options retain their published names for existing toolchains and CLion run configurations.
 
+The optional `prooftray_heif_core` target exposes the C++20 still-image decoder in `prooftray/heif_image.h`.
+Android and iOS configurations enable it by default. Other platforms can enable `PROOFTRAY_BUILD_HEIF`.
+The caller supplies the encoded bytes and a destination buffer for premultiplied sRGB RGBA8. Browsers may use embedded thumbnails.
+Editing and export decode the primary image.
+
 Color processing:
 
 - `color_lut.h` / `color_lut.cc` parse CUBE and decoded Hald RGBA8 data without Android dependencies.

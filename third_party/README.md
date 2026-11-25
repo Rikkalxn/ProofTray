@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | LibRaw | `libraw/upstream` Git submodule，父仓库记录完整提交号 | 完整使用独立上游库，需要持续更新机型和解码支持；升级时审查源码、接口、构建清单和样片。 |
 | libtiff | `libtiff/upstream` Git submodule，固定 4.7.2 提交 | Log RGB16 TIFF 写出；仅启用 zlib/Deflate，升级说明见 `libtiff/README.md`。 |
+| libheif、libde265 | `heif/libheif`、`heif/libde265` Git submodule，分别固定 1.23.7 和 1.1.3 | 相机 HEIF 软件解码。两个独立共享库仅启用 HEVC 解码后端。 |
 | furble | 保留 `furble/` 中的 Blowfish 源码和 MIT 许可 | 仅使用两个源码文件及独立的配对哈希适配，不引入完整相机遥控固件；按需要人工核对相关上游改动。 |
 | Adobe DNG SDK 参考呈现 | 保留适配后的 core 代码与许可、来源提交 | 属于移植的呈现阶段，并未链接完整 SDK；升级需要对照参考实现审查算法。 |
 | AndroidX、Kotlin、Nordic BLE、JSch、Okio 等 | Gradle/Maven 固定版本和 Compose BOM | 包管理器负责依赖解析及传递依赖，源码 submodule 不代替这些制品。 |

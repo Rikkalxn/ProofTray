@@ -81,6 +81,9 @@ androidComponents.onVariants { variant ->
             notice(root.file("third_party/libraw/upstream/$name"), "LibRaw-$name.txt")
         }
         notice(root.file("third_party/libtiff/upstream/LICENSE.md"), "libtiff-LICENSE.md")
+        for (name in listOf("libheif", "libde265")) {
+            notice(root.file("third_party/heif/$name/COPYING"), "$name-COPYING.txt")
+        }
         notice(ndkNotice, "Android-NDK-NOTICE.txt")
         from(root.dir("licenses")) {
             include("*.txt")
