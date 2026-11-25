@@ -50,7 +50,8 @@ git clone --recurse-submodules <仓库地址>
 ```
 
 APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
-推送和 PR 会触发 [Build](.github/workflows/build.yml) 工作流，构建调试 APK 并运行 JVM、C++ 核心和 Log TIFF 测试。
+PR 会触发 [Build](.github/workflows/build.yml) 工作流，构建调试 APK 并运行 JVM 单元测试，也可手动启动。
+在 Ubuntu 上本地构建桌面 C++ 核心和 Log TIFF 测试时，使用 [Ubuntu 脚本](core/README.md#ubuntu-build)。
 
 ## 源码结构
 
@@ -70,10 +71,10 @@ APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
 1. 在 **Settings → Secrets and variables → Actions** 中添加：
    - `ANDROID_KEYSTORE_BASE64`：Base64 编码的 Release 密钥库，密钥别名为 `prooftray`
    - `ANDROID_KEYSTORE_PASSWORD`：密钥库密码，同时用作密钥密码
-2. 在默认分支上运行 **Actions → Release → Run workflow**。
+2. 推送到 `master` 后自动运行 **Release**。也可在默认分支上从 **Actions → Release** 手动运行。
 
-工作流会将补丁版本号和 `versionCode` 各加 1，签名 APK，推送 `v<版本>` 标签，并发布 APK 和源码包。
-在同一提交上重新运行会沿用该版本。
+工作流将补丁版本号和 `versionCode` 各加 1，签名 APK，推送版本提交和 `v<版本>` 标签，并在 GitHub Releases 发布 APK 和源码包。
+在同一提交上重新运行会沿用该版本。有新推送时，以更新的提交为准。下次推送前先同步远端的版本提交。
 
 ## License
 

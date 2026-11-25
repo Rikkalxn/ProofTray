@@ -52,8 +52,8 @@ git clone --recurse-submodules <repository-url>
 ```
 
 The APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
-Pushes and pull requests trigger the [Build](.github/workflows/build.yml) workflow, which builds the debug APK and runs JVM,
-C++ core and Log TIFF tests.
+Pull requests trigger the [Build](.github/workflows/build.yml) workflow, which builds the debug APK and runs JVM unit tests.
+You can also run it manually. To build the desktop C++ core and Log TIFF tests locally, use the [Ubuntu script](core/README.md#ubuntu-build).
 
 ## Source layout
 
@@ -73,10 +73,11 @@ Both the source package and the application ID are `org.prooftray.app`. `core/` 
 1. Under **Settings → Secrets and variables → Actions**, add:
    - `ANDROID_KEYSTORE_BASE64`: the release keystore, Base64-encoded, with the key alias `prooftray`
    - `ANDROID_KEYSTORE_PASSWORD`: the keystore password, also used as the key password
-2. Run **Actions → Release → Run workflow** on the default branch.
+2. Pushing to `master` starts **Release** automatically. You can also run **Actions → Release** manually on the default branch.
 
-The workflow bumps the patch version and `versionCode` by one, signs the APK, pushes the `v<version>` tag and publishes the APK
-and source archive. Rerunning on the same commit reuses its version.
+The workflow bumps the patch version and `versionCode` by one, signs the APK, pushes the version commit and `v<version>` tag,
+and publishes the APK and source archive to GitHub Releases. Rerunning on the same commit reuses its version. Newer pushes supersede
+older ones. Pull the version commit from the remote before your next push.
 
 ## License
 

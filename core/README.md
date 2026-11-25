@@ -65,3 +65,15 @@ Location protocol:
 - Optional altitude/satellite fields are omitted when unavailable. Invalid samples cannot produce a valid GPS record.
 - PTP command construction now supports the host-to-camera data direction used by location writes.
 - `tests/nikon_location_test.cc` covers the wire representation and boundaries.
+
+## Ubuntu build
+
+Install the C++ toolchain and zlib headers, then run the script from the repository root.
+
+```sh
+sudo apt install build-essential cmake git ninja-build zlib1g-dev
+bash core/build-ubuntu.sh
+```
+
+The script builds the desktop C++ core and the test executables, including Log TIFF, under `out/build/ubuntu-core`.
+Run the tests separately with `ctest --test-dir out/build/ubuntu-core --output-on-failure`.

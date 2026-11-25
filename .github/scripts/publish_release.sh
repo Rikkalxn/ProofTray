@@ -23,8 +23,16 @@ git ls-files --recurse-submodules -z |
   tar --create --gzip --file="$source_archive" --no-recursion --null --files-from=-
 if [[ "$NEW_VERSION" == true ]]; then
   # A concurrent branch update rejects both refs. Never publish a tag for a rejected version commit.
-  git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push --atomic origin \
-    "HEAD:refs/heads/$GITHUB_REF_NAME" "refs/tags/$tag"
+  branch_ref="refs/heads/$GITHUB_REF_NAME"
+  authenticated_git=(git -c credential.helper= -c 'credential.helper=!gh auth git-credential')
+  if ! "${authenticated_git[@]}" push --atomic origin "HEAD:$branch_ref" "refs/tags/$tag"; then
+    remote_tip=$("${authenticated_git[@]}" ls-remote --exit-code origin "$branch_ref" | cut -f 1)
+    if [[ "$GITHUB_EVENT_NAME" == push && "$remote_tip" != "$(git rev-parse HEAD^)" && "$remote_tip" != "$(git rev-parse HEAD)" ]]; then
+      echo "A newer push superseded this build." >> "$GITHUB_STEP_SUMMARY"
+      exit 0
+    fi
+    exit 1
+  fi
 fi
 
 if [[ -z "$state" ]]; then

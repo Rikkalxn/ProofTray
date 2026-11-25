@@ -32,18 +32,24 @@ def prepare(branch):
         raise SystemExit("Android versionCode limit reached")
     tag = f"v{version}"
     contents = f"versionName={version}\nversionCode={code}\n"
+    branch_advanced = source != git("rev-parse", f"refs/remotes/origin/{branch}")
+    superseded_push = branch_advanced and os.environ["GITHUB_EVENT_NAME"] == "push"
 
     if git("tag", "--list", tag) == tag:
         # A previous attempt may have pushed the version commit before uploading all assets.
         commit = git("rev-parse", f"refs/tags/{tag}^{{commit}}")
         parents = git("rev-list", "--parents", "-1", commit).split()[1:]
-        if (parents != [source] or git("diff", "--name-only", source, commit) != VERSION_FILE.name
-                or git("show", f"{commit}:{VERSION_FILE.name}") != contents.strip()):
+        if (parents == [source] and git("diff", "--name-only", source, commit) == VERSION_FILE.name
+                and git("show", f"{commit}:{VERSION_FILE.name}") == contents.strip()):
+            git("checkout", "--quiet", "--detach", commit)
+            return version, code, False
+        if not superseded_push:
             raise SystemExit(f"{tag} already belongs to a different update")
-        git("checkout", "--quiet", "--detach", commit)
-        return version, code, False
 
-    if source != git("rev-parse", f"refs/remotes/origin/{branch}"):
+    if superseded_push:
+        print("Skipping a superseded push to the default branch.")
+        return None
+    if branch_advanced:
         raise SystemExit("The default branch advanced. Start Release from its latest commit.")
     VERSION_FILE.write_text(contents, encoding="utf-8")
     git("-c", "user.name=github-actions[bot]", "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
@@ -53,6 +59,8 @@ def prepare(branch):
 
 
 if __name__ == "__main__":
-    version, code, new = prepare(os.environ["GITHUB_REF_NAME"])
-    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-        print(f"version={version}\ncode={code}\nnew={'true' if new else 'false'}", file=output)
+    release = prepare(os.environ["GITHUB_REF_NAME"])
+    if release is not None:
+        version, code, new = release
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            print(f"version={version}\ncode={code}\nnew={'true' if new else 'false'}", file=output)
